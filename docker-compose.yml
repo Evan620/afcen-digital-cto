@@ -1,0 +1,78 @@
+services:
+  # ── Digital CTO Application ──
+  cto-app:
+    build: .
+    container_name: digital-cto
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - POSTGRES_URL=postgresql+asyncpg://cto:cto_secret@postgres:5432/digital_cto
+      - QDRANT_URL=http://qdrant:6333
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src  # Hot-reload in development
+    restart: unless-stopped
+
+  # ── Working Memory ──
+  redis:
+    image: redis:7-alpine
+    container_name: digital-cto-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Episodic Memory ──
+  postgres:
+    image: postgres:16-alpine
+    container_name: digital-cto-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: cto
+      POSTGRES_PASSWORD: cto_secret
+      POSTGRES_DB: digital_cto
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-STR", "pg_isready -U cto -d digital_cto"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Semantic Memory ──
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: digital-cto-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"  # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/6333 && echo -e 'GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n' >&3 && cat <&3 | grep -q '200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  postgres_data:
+  qdrant_data:
