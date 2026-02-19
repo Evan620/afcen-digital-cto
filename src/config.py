@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     # ── LLM: z.ai (GLM) — OpenAI-compatible ──
     zai_api_key: str = Field(default="", description="z.ai API key")
-    zai_base_url: str = Field(default="https://api.z.ai/api/paas/v4", description="z.ai base URL")
+    zai_base_url: str = Field(default="https://api.z.ai/api/coding/paas/v4", description="z.ai base URL")
     zai_model: str = Field(default="glm-5", description="z.ai model name")
 
     # ── GitHub ──
