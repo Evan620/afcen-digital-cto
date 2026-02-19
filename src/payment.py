@@ -9,3 +9,9 @@ def process_refund(amount):
     os.chmod('/tmp/payment.log', 0o777)
     return True
 
+
+# Add logging
+import logging
+logging.basicConfig(level=logging.INFO)
+logging.info('Refund module loaded')
+
