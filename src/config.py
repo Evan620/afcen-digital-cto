@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # ── LLM: Anthropic (Claude) — preferred for code review ──
     anthropic_api_key: str = Field(default="", description="Anthropic API key for Claude")
 
+    # ── LLM: z.ai (GLM) — OpenAI-compatible ──
+    zai_api_key: str = Field(default="", description="z.ai API key")
+    zai_base_url: str = Field(default="https://api.z.ai/api/paas/v4", description="z.ai base URL")
+    zai_model: str = Field(default="glm-5", description="z.ai model name")
+
     # ── GitHub ──
     github_token: str = Field(default="", description="GitHub Personal Access Token")
     github_webhook_secret: str = Field(default="", description="Secret for webhook HMAC verification")
@@ -60,6 +65,10 @@ class Settings(BaseSettings):
     @property
     def has_anthropic(self) -> bool:
         return bool(self.anthropic_api_key)
+
+    @property
+    def has_zai(self) -> bool:
+        return bool(self.zai_api_key)
 
 
 # Singleton instance — import this everywhere

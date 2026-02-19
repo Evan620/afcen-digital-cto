@@ -38,6 +38,7 @@ Edit `.env` with:
 |----------|----------|-------------|
 | `ANTHROPIC_API_KEY` | Yes* | Claude API key (preferred for code review) |
 | `AZURE_OPENAI_API_KEY` | Yes* | Azure OpenAI key (alternative to Anthropic) |
+| `ZAI_API_KEY` | Yes* | z.ai API key (GLM-5, OpenAI-compatible) |
 | `GITHUB_TOKEN` | Yes | GitHub PAT with `repo` scope |
 | `GITHUB_WEBHOOK_SECRET` | Yes | Secret for webhook HMAC verification |
 | `GITHUB_REPOS` | No | Comma-separated repos to monitor (e.g., `afcen/platform`) |

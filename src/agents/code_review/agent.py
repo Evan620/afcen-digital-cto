@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import AzureChatOpenAI
+from langchain_openai import AzureChatOpenAI, ChatOpenAI
 from langgraph.graph import END, StateGraph
 
 from src.agents.code_review.prompts import CODE_REVIEW_SYSTEM_PROMPT, PR_ANALYSIS_PROMPT
@@ -145,11 +145,19 @@ async def run_llm_review(state: CodeReviewState) -> dict:
         additional_context=additional_context,
     )
 
-    # Choose LLM — prefer Claude for code review, fall back to Azure OpenAI
+    # Choose LLM — prefer Claude, then z.ai (GLM-5), fall back to Azure OpenAI
     if settings.has_anthropic:
         llm = ChatAnthropic(
             model="claude-sonnet-4-20250514",
             api_key=settings.anthropic_api_key,
+            temperature=0,
+            max_tokens=4096,
+        )
+    elif settings.has_zai:
+        llm = ChatOpenAI(
+            model=settings.zai_model,
+            api_key=settings.zai_api_key,
+            base_url=settings.zai_base_url,
             temperature=0,
             max_tokens=4096,
         )
@@ -163,7 +171,7 @@ async def run_llm_review(state: CodeReviewState) -> dict:
             max_tokens=4096,
         )
     else:
-        return {"error": "No LLM configured. Set ANTHROPIC_API_KEY or AZURE_OPENAI_API_KEY."}
+        return {"error": "No LLM configured. Set ANTHROPIC_API_KEY, ZAI_API_KEY, or AZURE_OPENAI_API_KEY."}
 
     messages = [
         SystemMessage(content=CODE_REVIEW_SYSTEM_PROMPT),
