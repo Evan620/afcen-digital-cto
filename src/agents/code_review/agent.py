@@ -159,7 +159,7 @@ async def run_llm_review(state: CodeReviewState) -> dict:
             api_key=settings.zai_api_key,
             base_url=settings.zai_base_url,
             temperature=0,
-            max_tokens=4096,
+            max_tokens=8192,
         )
     elif settings.has_azure_openai:
         llm = AzureChatOpenAI(
@@ -182,13 +182,77 @@ async def run_llm_review(state: CodeReviewState) -> dict:
         response = await llm.ainvoke(messages)
         content = response.content
 
-        # Parse JSON from the response (handle markdown code blocks)
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
+        # Log finish reason if available
+        finish_reason = getattr(response, 'response_metadata', {}).get('finish_reason', 'unknown')
+        logger.info("LLM response: %d chars, finish_reason=%s", len(content), finish_reason)
 
-        review_result = json.loads(content.strip())
+        # Extract the JSON object from the response.
+        # GLM-5 may embed markdown code blocks *inside* JSON string values,
+        # so we can't safely split on ``` — instead find the outermost { ... }
+        import re
+        json_match = re.search(r'\{', content)
+        if json_match:
+            # Find the outermost JSON object by matching braces
+            start = json_match.start()
+            depth = 0
+            in_string = False
+            escape = False
+            end = start
+            for i in range(start, len(content)):
+                c = content[i]
+                if escape:
+                    escape = False
+                    continue
+                if c == '\\':
+                    escape = True
+                    continue
+                if c == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            json_str = content[start:end]
+        else:
+            json_str = content.strip()
+
+        # Try direct parse
+        try:
+            review_result = json.loads(json_str)
+        except json.JSONDecodeError:
+            # GLM-5 sometimes includes literal newlines in JSON string values
+            # Escape them for valid JSON
+            logger.warning("Direct JSON parse failed, attempting sanitization...")
+            sanitized = json_str
+            # Replace literal newlines inside strings with \\n
+            sanitized = re.sub(r'(?<=": ")(.*?)(?="[,\s*\}])', 
+                             lambda m: m.group(0).replace('\n', '\\n'), 
+                             sanitized, flags=re.DOTALL)
+            try:
+                review_result = json.loads(sanitized)
+                logger.info("JSON sanitization succeeded")
+            except json.JSONDecodeError:
+                # Last resort: balance brackets and try again
+                repaired = sanitized
+                if repaired.count('"') % 2 != 0:
+                    repaired += '"'
+                open_brackets = repaired.count('[') - repaired.count(']')
+                open_braces = repaired.count('{') - repaired.count('}')
+                repaired += ']' * max(0, open_brackets)
+                repaired += '}' * max(0, open_braces)
+                try:
+                    review_result = json.loads(repaired)
+                    logger.info("JSON repair succeeded")
+                except json.JSONDecodeError:
+                    logger.error("Raw LLM output (first 3000 chars): %s", json_str[:3000])
+                    raise
+
         logger.info(
             "LLM review complete for PR #%d: verdict=%s, %d comments",
             state["pr_number"],
