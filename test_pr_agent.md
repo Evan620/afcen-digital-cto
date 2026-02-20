@@ -1,2 +1,2 @@
 # PR Agent Test
-Final config verification with secrets.toml.
+GitHub App webhook test.
