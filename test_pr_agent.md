@@ -1,2 +1,2 @@
 # PR Agent Test
-Verifying GitHub App installation is working.
+Full config verification with key file mount.
