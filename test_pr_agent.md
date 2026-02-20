@@ -1,2 +1,2 @@
 # PR Agent Test
-Full config verification with key file mount.
+Final config verification with secrets.toml.
