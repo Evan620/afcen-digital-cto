@@ -1,2 +1,2 @@
 # PR Agent Test
-Updated again to verify webhook path fix.
+Verifying GitHub App installation is working.
