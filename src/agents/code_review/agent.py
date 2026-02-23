@@ -288,12 +288,34 @@ async def post_review_to_github(state: CodeReviewState) -> dict:
                 "body": comment["body"],
             })
 
+        # Determine the review event type
+        verdict = result.get("verdict", "COMMENT")
+
+        # GitHub doesn't allow REQUEST_CHANGES on your own PRs
+        # If reviewer is the PR author, downgrade to COMMENT
+        if verdict == "REQUEST_CHANGES":
+            try:
+                reviewer_login = github.get_authenticated_user()
+                if reviewer_login == state["pr_author"]:
+                    logger.info(
+                        "Reviewer %s is PR author — changing verdict from REQUEST_CHANGES to COMMENT",
+                        reviewer_login,
+                    )
+                    verdict = "COMMENT"
+                    # Add a note to the summary
+                    result["summary"] = (
+                        result.get("summary", "")
+                        + "\n\n> ⚠️ **Note:** Verdict changed from REQUEST_CHANGES to COMMENT because the reviewer is the PR author."
+                    )
+            except Exception as e:
+                logger.warning("Could not check reviewer identity: %s", e)
+
         # Post the review
         github.post_review(
             repo_full_name=state["repository"],
             pr_number=state["pr_number"],
             body=result.get("summary", "Review complete."),
-            event=result.get("verdict", "COMMENT"),
+            event=verdict,
             comments=inline_comments,
         )
 

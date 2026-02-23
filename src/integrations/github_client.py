@@ -190,6 +190,13 @@ class GitHubClient:
         for label in labels:
             issue.add_to_labels(label)
 
+    # ── Authenticated User ──
+
+    def get_authenticated_user(self) -> str:
+        """Get the login of the authenticated user."""
+        user = self.github.get_user()
+        return user.login
+
     # ── Health ──
 
     def health_check(self) -> bool:
