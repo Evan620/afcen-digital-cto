@@ -137,6 +137,70 @@ class GitHubClient:
             logger.warning("Could not fetch %s:%s — %s", repo_full_name, path, e)
             return ""
 
+    # ── Issue Operations ──
+
+    def get_repository_issues(
+        self,
+        repo_full_name: str,
+        state: str = "open",
+        labels: list[str] | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch issues from a repository.
+
+        Args:
+            repo_full_name: 'owner/repo'
+            state: 'open', 'closed', or 'all'
+            labels: Filter by labels
+            since: ISO date string to filter issues updated after this date
+            limit: Maximum number of issues to return
+
+        Returns:
+            List of issue dictionaries with relevant fields
+        """
+        repo = self.github.get_repo(repo_full_name)
+        issues = []
+
+        try:
+            kwargs = {"state": state}
+            if labels:
+                kwargs["labels"] = ",".join(labels)
+            if since:
+                kwargs["since"] = since
+
+            for issue in repo.get_issues(**kwargs):
+                if len(issues) >= limit:
+                    break
+
+                # Skip pull requests (they show up in issues API)
+                if issue.pull_request:
+                    continue
+
+                issues.append({
+                    "number": issue.number,
+                    "title": issue.title,
+                    "body": issue.body or "",
+                    "state": issue.state,
+                    "labels": [{"name": label.name} for label in issue.labels],
+                    "assignees": [{"login": a.login} for a in issue.assignees],
+                    "milestone": {
+                        "title": issue.milestone.title,
+                        "due_on": issue.milestone.due_on.isoformat() if issue.milestone and issue.milestone.due_on else None,
+                    } if issue.milestone else None,
+                    "created_at": issue.created_at.isoformat(),
+                    "updated_at": issue.updated_at.isoformat(),
+                    "closed_at": issue.closed_at.isoformat() if issue.closed_at else None,
+                    "html_url": issue.html_url,
+                })
+
+            logger.info("Fetched %d issues from %s", len(issues), repo_full_name)
+            return issues
+
+        except GithubException as e:
+            logger.warning("Could not fetch issues from %s — %s", repo_full_name, e)
+            return []
+
     # ── Review Posting ──
 
     def post_review(

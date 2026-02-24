@@ -25,6 +25,9 @@ dependencies = [
     "PyGithub>=2.5.0",
     "httpx>=0.28.0",
 
+    # WebSocket for OpenClaw/JARVIS
+    "websockets>=14.0",
+
     # Configuration
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",

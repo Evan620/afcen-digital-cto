@@ -14,10 +14,16 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 from src.config import settings
 from src.integrations.github_client import GitHubClient
+from src.integrations.openclaw_client import OpenClawClient
 from src.memory.postgres_store import PostgresStore
 from src.memory.qdrant_store import QdrantStore
 from src.memory.redis_store import RedisStore
 from src.supervisor.graph import supervisor_graph
+from src.agents.sprint_planner.agent import (
+    get_sprint_status,
+    get_sprint_report,
+    get_bayes_tracking,
+)
 
 # ── Logging ──
 
@@ -34,6 +40,7 @@ redis_store = RedisStore()
 postgres_store = PostgresStore()
 qdrant_store = QdrantStore()
 github_client = GitHubClient()
+openclaw_client = OpenClawClient() if settings.openclaw_enabled else None
 
 
 # ── App Lifecycle ──
@@ -46,12 +53,39 @@ async def lifespan(app: FastAPI):
     logger.info("  AfCEN Digital CTO starting up...")
     logger.info("  Environment: %s", settings.environment)
     logger.info("  Monitored repos: %s", settings.monitored_repos or "(none configured)")
+    logger.info("  OpenClaw enabled: %s", settings.openclaw_enabled)
     logger.info("=" * 60)
 
     # Connect memory stores
     await redis_store.connect()
     await postgres_store.init_db()
     await qdrant_store.connect()
+
+    # Connect to OpenClaw if enabled
+    if openclaw_client:
+        openclaw_ok = await openclaw_client.health_check()
+        if openclaw_ok:
+            logger.info("OpenClaw Gateway connected: %s", settings.openclaw_gateway_url)
+            # Register Digital CTO capabilities
+            await openclaw_client.register_agent(
+                agent_name="Digital CTO",
+                capabilities=[
+                    "code_review",
+                    "sprint_planning",
+                    "bayes_tracking",
+                    "metrics_reporting",
+                    "ceo_commands",
+                ],
+                endpoints={
+                    "health": "/health",
+                    "sprint_status": "/sprint/status",
+                    "sprint_report": "/sprint/report",
+                    "bayes_tracking": "/sprint/bayes",
+                    "sprint_query": "/sprint/query",
+                },
+            )
+        else:
+            logger.warning("OpenClaw Gateway not reachable at %s", settings.openclaw_gateway_url)
 
     logger.info("All memory stores connected. Digital CTO is online.")
 
@@ -62,6 +96,8 @@ async def lifespan(app: FastAPI):
     await redis_store.disconnect()
     await postgres_store.disconnect()
     await qdrant_store.disconnect()
+    if openclaw_client:
+        await openclaw_client.close()
     logger.info("All connections closed. Goodbye.")
 
 
@@ -70,7 +106,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AfCEN Digital CTO",
     description="AI-powered multi-agent technical leadership system",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -94,17 +130,29 @@ async def health_check():
     except Exception:
         postgres_ok = False
 
+    # OpenClaw check
+    openclaw_ok = False
+    if openclaw_client:
+        openclaw_ok = await openclaw_client.health_check()
+
     all_ok = redis_ok and postgres_ok and qdrant_ok
+    if settings.openclaw_enabled:
+        all_ok = all_ok and openclaw_ok
+
+    services = {
+        "redis": "ok" if redis_ok else "down",
+        "postgres": "ok" if postgres_ok else "down",
+        "qdrant": "ok" if qdrant_ok else "down",
+    }
+    if settings.openclaw_enabled:
+        services["openclaw"] = "ok" if openclaw_ok else "down"
 
     return {
         "status": "ok" if all_ok else "degraded",
-        "services": {
-            "redis": "ok" if redis_ok else "down",
-            "postgres": "ok" if postgres_ok else "down",
-            "qdrant": "ok" if qdrant_ok else "down",
-        },
+        "services": services,
         "environment": settings.environment,
         "monitored_repos": settings.monitored_repos,
+        "openclaw_enabled": settings.openclaw_enabled,
     }
 
 
@@ -197,8 +245,76 @@ async def root():
     """Landing page with basic info."""
     return {
         "name": "AfCEN Digital CTO",
-        "version": "0.1.0",
-        "phase": "1 — Foundation",
-        "capabilities": ["code_review", "pr_management"],
+        "version": "0.2.0",
+        "phase": "2 — Sprint Management",
+        "capabilities": ["code_review", "sprint_planner", "bayes_tracking"],
         "docs": "/docs",
     }
+
+
+# ── Sprint Planner Endpoints ──
+
+
+@app.get("/sprint/status")
+async def sprint_status(repository: str | None = None):
+    """Get quick sprint status with metrics."""
+    try:
+        metrics = await get_sprint_status(repository)
+        return {"status": "ok", "metrics": metrics}
+    except Exception as e:
+        logger.error("Failed to get sprint status: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/sprint/report")
+async def sprint_report(repository: str | None = None, sprint_id: str | None = None):
+    """Get comprehensive sprint report."""
+    try:
+        report = await get_sprint_report(repository, sprint_id)
+        return {"status": "ok", "report": report}
+    except Exception as e:
+        logger.error("Failed to get sprint report: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/sprint/bayes")
+async def bayes_tracking(repository: str | None = None):
+    """Get Bayes Consulting deliverable tracking."""
+    try:
+        bayes = await get_bayes_tracking(repository)
+        return {"status": "ok", "bayes_summary": bayes}
+    except Exception as e:
+        logger.error("Failed to get Bayes tracking: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/sprint/query")
+async def sprint_query(request: Request):
+    """Generic sprint query endpoint for JARVIS integration."""
+    body = await request.json()
+    query_type = body.get("query_type", "status")
+    repository = body.get("repository")
+    sprint_id = body.get("sprint_id")
+
+    # Route through the supervisor graph
+    supervisor_input = {
+        "event_type": query_type,
+        "source": "jarvis",
+        "payload": {
+            "repository": repository,
+            "sprint_id": sprint_id,
+            "include_bayes": body.get("include_bayes", True),
+            "include_recommendations": body.get("include_recommendations", True),
+        },
+        "routed_to": None,
+        "result": None,
+        "error": None,
+    }
+
+    result = await supervisor_graph.ainvoke(supervisor_input)
+
+    if result.get("error"):
+        logger.error("Sprint query error: %s", result["error"])
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    return {"status": "ok", "result": result.get("result")}

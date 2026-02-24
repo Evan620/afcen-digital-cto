@@ -1,16 +1,32 @@
 services:
+  # ── Tailscale Sidecar (Phase 2: OpenClaw Integration) ──
+  ts-cto:
+    image: tailscale/tailscale:latest
+    container_name: digital-cto-tailscale
+    hostname: digital-cto
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - tailscale_data:/var/lib/tailscale
+    ports:
+      - "8000:8000"  # Exposed here since cto-app shares this network
+    restart: unless-stopped
+
   # ── Digital CTO Application ──
   cto-app:
     build: .
     container_name: digital-cto
-    ports:
-      - "8000:8000"
+    network_mode: "service:ts-cto"  # Shares Tailscale + Docker bridge
     env_file:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
       - POSTGRES_URL=postgresql+asyncpg://cto:cto_secret@postgres:5432/digital_cto
       - QDRANT_URL=http://qdrant:6333
+      - OPENCLAW_ENABLED=true
+      - OPENCLAW_GATEWAY_URL=http://100.125.211.92:18789
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-digital_cto_2026}
     depends_on:
       redis:
         condition: service_healthy
@@ -18,6 +34,8 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+      ts-cto:
+        condition: service_started
     volumes:
       - ./src:/app/src # Hot-reload in development
     restart: unless-stopped
@@ -27,7 +45,7 @@ services:
     image: redis:7-alpine
     container_name: digital-cto-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -42,7 +60,7 @@ services:
     image: postgres:16-alpine
     container_name: digital-cto-postgres
     ports:
-      - "5432:5432"
+      - "5434:5432"
     environment:
       POSTGRES_USER: cto
       POSTGRES_PASSWORD: cto_secret
@@ -88,3 +106,4 @@ volumes:
   redis_data:
   postgres_data:
   qdrant_data:
+  tailscale_data:

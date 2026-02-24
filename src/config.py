@@ -51,6 +51,20 @@ class Settings(BaseSettings):
     )
     qdrant_url: str = Field(default="http://localhost:6333", description="Qdrant server URL")
 
+    # ── OpenClaw Gateway (JARVIS Integration) ──
+    openclaw_gateway_url: str = Field(
+        default="http://100.125.211.92:18789",
+        description="OpenClaw Gateway URL (HTTP for health, WS for messaging)",
+    )
+    openclaw_enabled: bool = Field(
+        default=False,
+        description="Enable OpenClaw integration for JARVIS communication",
+    )
+    openclaw_gateway_token: str = Field(
+        default="digital_cto_2026",
+        description="Token for OpenClaw Gateway authentication",
+    )
+
     @property
     def monitored_repos(self) -> list[str]:
         """Parse comma-separated repo list into a list of 'owner/repo' strings."""

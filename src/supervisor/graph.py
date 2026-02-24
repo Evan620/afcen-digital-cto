@@ -1,10 +1,11 @@
 """LangGraph Supervisor — the central routing brain of the Digital CTO.
 
 The Supervisor receives incoming events (GitHub webhooks, Slack messages,
-scheduled tasks) and routes them to the appropriate sub-agent.
+scheduled tasks, direct queries) and routes them to the appropriate sub-agent.
 
-For Phase 1, it only routes to the Code Review agent.
-Future phases will add: Sprint Planner, Market Scanner, Architecture Advisor.
+Phase 1: Code Review agent
+Phase 2: Sprint Planner agent
+Future phases: Market Scanner, Architecture Advisor.
 """
 
 from __future__ import annotations
@@ -15,6 +16,11 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict
 from langgraph.graph import END, StateGraph
 
 from src.agents.code_review.agent import code_review_graph, CodeReviewState
+from src.agents.sprint_planner.agent import (
+    sprint_planner_graph,
+    SprintPlannerState,
+    SprintQueryType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +32,8 @@ class SupervisorState(TypedDict):
     """Top-level state for the supervisor routing graph."""
 
     # Input
-    event_type: str  # "pull_request", "sprint_update", "meeting", etc.
-    source: str  # "github_webhook", "slack", "scheduler"
+    event_type: str  # "pull_request", "sprint_query", "sprint_report", "meeting", etc.
+    source: str  # "github_webhook", "jarvis", "scheduler", "direct"
     payload: Dict[str, Any]  # Raw event data
 
     # Routing
@@ -42,21 +48,24 @@ class SupervisorState(TypedDict):
 
 
 async def classify_event(state: SupervisorState) -> dict:
-    """Classify the incoming event and determine which agent should handle it.
-
-    For Phase 1, only PR events are routed. All others are logged and skipped.
-    """
+    """Classify the incoming event and determine which agent should handle it."""
     event_type = state["event_type"]
 
     if event_type == "pull_request":
         logger.info("Event classified: pull_request → routing to Code Review agent")
         return {"routed_to": "code_review"}
 
+    elif event_type in ("sprint_query", "sprint_report", "sprint_status", "bayes_tracking"):
+        logger.info("Event classified: %s → routing to Sprint Planner agent", event_type)
+        return {"routed_to": "sprint_planner"}
+
     # Future: add routing for other event types
-    # elif event_type == "sprint_update":
-    #     return {"routed_to": "sprint_planner"}
     # elif event_type == "meeting":
     #     return {"routed_to": "meeting_intelligence"}
+    # elif event_type == "market_scan":
+    #     return {"routed_to": "market_scanner"}
+    # elif event_type == "architecture_query":
+    #     return {"routed_to": "architecture_advisor"}
 
     logger.warning("Unhandled event type: %s — no agent assigned", event_type)
     return {"routed_to": None, "error": f"No agent registered for event type: {event_type}"}
@@ -109,6 +118,64 @@ async def route_to_code_review(state: SupervisorState) -> dict:
         return {"error": f"Code Review agent failed: {e}"}
 
 
+async def route_to_sprint_planner(state: SupervisorState) -> dict:
+    """Execute the Sprint Planner agent subgraph."""
+    payload = state["payload"]
+    event_type = state["event_type"]
+
+    # Determine query type
+    query_type_map = {
+        "sprint_query": SprintQueryType.STATUS,
+        "sprint_report": SprintQueryType.REPORT,
+        "sprint_status": SprintQueryType.STATUS,
+        "bayes_tracking": SprintQueryType.BAYES_TRACKING,
+    }
+    query_type = query_type_map.get(event_type, SprintQueryType.STATUS)
+
+    # Build the Sprint Planner agent's input state
+    planner_input: SprintPlannerState = {
+        "query_type": query_type.value,
+        "repository": payload.get("repository"),
+        "sprint_id": payload.get("sprint_id"),
+        "include_bayes": payload.get("include_bayes", True),
+        "include_recommendations": payload.get("include_recommendations", True),
+        "issues": [],
+        "project_items": [],
+        "metrics": None,
+        "report": None,
+        "bayes_summary": None,
+        "recommendations": [],
+        "error": None,
+    }
+
+    try:
+        # Run the sprint planner subgraph
+        result = await sprint_planner_graph.ainvoke(planner_input)
+
+        logger.info(
+            "Sprint Planner complete: query_type=%s, has_report=%s, error=%s",
+            query_type.value,
+            result.get("report") is not None,
+            result.get("error"),
+        )
+
+        return {
+            "result": {
+                "agent": "sprint_planner",
+                "query_type": query_type.value,
+                "metrics": result.get("metrics"),
+                "report": result.get("report"),
+                "bayes_summary": result.get("bayes_summary"),
+                "recommendations": result.get("recommendations", []),
+                "error": result.get("error"),
+            }
+        }
+
+    except Exception as e:
+        logger.error("Sprint Planner agent crashed: %s", e)
+        return {"error": f"Sprint Planner agent failed: {e}"}
+
+
 async def handle_unknown(state: SupervisorState) -> dict:
     """Handle events that no agent can process."""
     logger.info("No agent available for event type: %s", state["event_type"])
@@ -124,6 +191,8 @@ def route_after_classify(state: SupervisorState) -> str:
 
     if routed_to == "code_review":
         return "route_to_code_review"
+    elif routed_to == "sprint_planner":
+        return "route_to_sprint_planner"
     else:
         return "handle_unknown"
 
@@ -134,13 +203,14 @@ def route_after_classify(state: SupervisorState) -> str:
 def build_supervisor_graph() -> StateGraph:
     """Construct the Supervisor as a LangGraph StateGraph.
 
-    Flow: classify_event → (code_review | unknown) → END
+    Flow: classify_event → (code_review | sprint_planner | unknown) → END
     """
     graph = StateGraph(SupervisorState)
 
     # Add nodes
     graph.add_node("classify_event", classify_event)
     graph.add_node("route_to_code_review", route_to_code_review)
+    graph.add_node("route_to_sprint_planner", route_to_sprint_planner)
     graph.add_node("handle_unknown", handle_unknown)
 
     # Entry point
@@ -152,12 +222,14 @@ def build_supervisor_graph() -> StateGraph:
         route_after_classify,
         {
             "route_to_code_review": "route_to_code_review",
+            "route_to_sprint_planner": "route_to_sprint_planner",
             "handle_unknown": "handle_unknown",
         },
     )
 
     # Terminal edges
     graph.add_edge("route_to_code_review", END)
+    graph.add_edge("route_to_sprint_planner", END)
     graph.add_edge("handle_unknown", END)
 
     return graph
