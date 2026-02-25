@@ -158,7 +158,7 @@ class OpenClawClient:
                     "mode": "cli",
                 },
                 "role": "operator",
-                "scopes": ["operator.read", "operator.write", "operator.admin"],
+                "scopes": ["operator.read", "operator.write"],
                 "caps": [],
                 "commands": [],
                 "permissions": {},
@@ -394,9 +394,10 @@ class OpenClawClient:
                 suggested_actions=response.payload.get("suggested_actions", []),
             )
         else:
+            error_msg = response.error if isinstance(response.error, str) else str(response.error)
             return JARVISResponse(
                 success=False,
-                message=response.error or "Failed to send message",
+                message=error_msg or "Failed to send message",
             )
 
     async def query_jarvis(

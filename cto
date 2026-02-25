@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Wrapper script for Digital CTO TUI
+# Uses the project's virtual environment
+
+PROJECT_DIR="/home/evan/Desktop/afcen-digital-cto"
+VENV="$PROJECT_DIR/.venv/bin/python"
+
+cd "$PROJECT_DIR" || exit 1
+
+# Install dependencies if not present
+if ! "$VENV" -c "import click" 2>/dev/null; then
+    echo "Installing TUI dependencies..."
+    "$VENV" -m pip install --quiet click questionary rich
+fi
+
+# Run the CLI
+"$VENV" -m src.tui.cli "$@"

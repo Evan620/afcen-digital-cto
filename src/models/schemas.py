@@ -120,3 +120,50 @@ class AgentEvent(BaseModel):
     source: str = Field(description="e.g. 'github_webhook', 'slack', 'scheduler'")
     payload: dict = Field(default_factory=dict, description="Raw event payload")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── JARVIS Directive Models ──
+
+
+class JarvisDirectiveType(str, Enum):
+    """Types of directives JARVIS can send to the Digital CTO."""
+
+    SPRINT_REPORT = "sprint_report"
+    REVIEW_PR = "review_pr"
+    TRACK_BAYES = "track_bayes"
+    ARCHITECTURE_QUERY = "architecture_query"
+    DEVOPS_STATUS = "devops_status"
+    APPROVAL_RESPONSE = "approval_response"
+    GENERAL_QUERY = "general_query"
+
+
+class JarvisDirective(BaseModel):
+    """A directive from JARVIS (CEO agent) to the Digital CTO."""
+
+    directive_id: str = Field(default_factory=lambda: "")
+    type: JarvisDirectiveType
+    payload: dict = Field(default_factory=dict)
+    priority: str = Field(default="normal", description="low, normal, high, urgent")
+    requires_response: bool = True
+    sender: str = "jarvis"
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class CTOResponseStatus(str, Enum):
+    """Status of a CTO response to a JARVIS directive."""
+
+    COMPLETED = "completed"
+    IN_PROGRESS = "in_progress"
+    FAILED = "failed"
+    NEEDS_APPROVAL = "needs_approval"
+
+
+class CTOResponse(BaseModel):
+    """Response from Digital CTO to a JARVIS directive."""
+
+    response_to: str = Field(description="directive_id this responds to")
+    status: CTOResponseStatus
+    result: dict = Field(default_factory=dict)
+    approval_request: dict | None = None
+    error: str | None = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)

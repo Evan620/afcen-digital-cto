@@ -2,18 +2,24 @@
 
 Flow:
   1. Receive sprint query
-  2. Fetch GitHub Projects V2 data
+  2. Fetch GitHub Projects V2 data (with Issues fallback)
   3. Calculate metrics
   4. Track Bayes deliverables
-  5. Generate report
+  5. Generate LLM-powered recommendations
+  6. Generate report
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, TypedDict
 
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import AzureChatOpenAI, ChatOpenAI
 from langgraph.graph import END, StateGraph
 
 from src.agents.sprint_planner.models import (
@@ -25,6 +31,12 @@ from src.agents.sprint_planner.models import (
     SprintQueryType,
     SprintReport,
     VendorType,
+)
+from src.agents.sprint_planner.prompts import (
+    SPRINT_RECOMMENDATIONS_PROMPT,
+    SPRINT_RECOMMENDATIONS_SYSTEM_PROMPT,
+    SPRINT_RETROSPECTIVE_PROMPT,
+    SPRINT_RETROSPECTIVE_SYSTEM_PROMPT,
 )
 from src.integrations.github_client import GitHubClient
 
@@ -47,6 +59,9 @@ class SprintPlannerState(TypedDict):
     # Intermediate
     issues: list[dict[str, Any]]
     project_items: list[dict[str, Any]]
+    use_projects_v2: bool
+    sprint_start_date: str | None
+    sprint_end_date: str | None
 
     # Output
     metrics: dict[str, Any] | None
@@ -62,8 +77,14 @@ class SprintPlannerState(TypedDict):
 
 
 async def fetch_sprint_data(state: SprintPlannerState) -> dict:
-    """Fetch sprint data from GitHub Issues and Projects."""
+    """Fetch sprint data from GitHub Projects V2 (preferred) or Issues (fallback)."""
+    from src.config import settings
+
     github = GitHubClient()
+    use_projects_v2 = False
+    sprint_start_date = None
+    sprint_end_date = None
+    project_items: list[dict[str, Any]] = []
 
     try:
         issues = []
@@ -73,12 +94,41 @@ async def fetch_sprint_data(state: SprintPlannerState) -> dict:
         if state.get("repository"):
             repositories = [state["repository"]]
         else:
-            # Default to configured repos
-            from src.config import settings
-
             repositories = settings.monitored_repos or []
 
-        # Fetch issues from each repository
+        # Try Projects V2 first
+        if settings.has_projects_v2:
+            try:
+                from src.integrations.github_graphql import GitHubGraphQLClient
+
+                graphql = GitHubGraphQLClient()
+                iteration = await graphql.get_current_sprint_iteration(
+                    settings.github_org, settings.github_project_number
+                )
+
+                if iteration:
+                    use_projects_v2 = True
+                    sprint_start_date = iteration["start_date"]
+                    # Calculate end date from start + duration
+                    start_dt = datetime.fromisoformat(iteration["start_date"])
+                    end_dt = start_dt + timedelta(days=iteration["duration_days"])
+                    sprint_end_date = end_dt.strftime("%Y-%m-%d")
+
+                    # Fetch project items for this iteration
+                    project_items = await graphql.get_project_items(
+                        settings.github_org,
+                        settings.github_project_number,
+                        iteration_id=iteration["id"],
+                    )
+                    logger.info(
+                        "Using Projects V2: %d items in sprint %s",
+                        len(project_items),
+                        iteration["title"],
+                    )
+            except Exception as e:
+                logger.warning("Projects V2 fetch failed, falling back to Issues: %s", e)
+
+        # Always fetch issues (needed for velocity and Bayes tracking)
         for repo in repositories:
             try:
                 repo_issues = github.get_repository_issues(repo, state="open")
@@ -98,7 +148,13 @@ async def fetch_sprint_data(state: SprintPlannerState) -> dict:
             except Exception as e:
                 logger.warning("Failed to fetch closed issues: %s", e)
 
-        return {"issues": issues}
+        return {
+            "issues": issues,
+            "project_items": project_items,
+            "use_projects_v2": use_projects_v2,
+            "sprint_start_date": sprint_start_date,
+            "sprint_end_date": sprint_end_date,
+        }
 
     except Exception as e:
         logger.error("Failed to fetch sprint data: %s", e)
@@ -121,8 +177,25 @@ async def calculate_metrics(state: SprintPlannerState) -> dict:
         total_issues = len(issues)
 
         now = datetime.utcnow()
-        sprint_start = now - timedelta(days=14)  # Assume 2-week sprint
-        sprint_end = now
+
+        # Use Projects V2 dates if available, else assume 2-week sprint
+        if state.get("sprint_start_date"):
+            sprint_start = datetime.fromisoformat(state["sprint_start_date"])
+        else:
+            sprint_start = now - timedelta(days=14)
+
+        if state.get("sprint_end_date"):
+            sprint_end = datetime.fromisoformat(state["sprint_end_date"])
+        else:
+            sprint_end = sprint_start + timedelta(days=14)
+
+        # Also incorporate Projects V2 story points if available
+        for item in state.get("project_items", []):
+            if item.get("story_points"):
+                sp = int(item["story_points"])
+                total_points += sp
+                if item.get("state", "").upper() == "CLOSED":
+                    completed_points += sp
 
         for issue in issues:
             labels = [l.get("name", "").lower() for l in issue.get("labels", [])]
@@ -288,76 +361,297 @@ async def track_bayes_deliverables(state: SprintPlannerState) -> dict:
         return {"error": f"Failed to track Bayes deliverables: {e}"}
 
 
+def _get_llm():
+    """Get the best available LLM using the cascade pattern."""
+    from src.config import settings
+
+    if settings.has_anthropic:
+        return ChatAnthropic(
+            model="claude-sonnet-4-20250514",
+            api_key=settings.anthropic_api_key,
+            temperature=0,
+            max_tokens=4096,
+        )
+    elif settings.has_zai:
+        return ChatOpenAI(
+            model=settings.zai_model,
+            api_key=settings.zai_api_key,
+            base_url=settings.zai_base_url,
+            temperature=0,
+            max_tokens=8192,
+        )
+    elif settings.has_azure_openai:
+        return AzureChatOpenAI(
+            azure_deployment=settings.azure_openai_deployment,
+            azure_endpoint=settings.azure_openai_endpoint,
+            api_key=settings.azure_openai_api_key,
+            api_version=settings.azure_openai_api_version,
+            temperature=0,
+            max_tokens=4096,
+        )
+    return None
+
+
+def _static_recommendations(metrics_data: dict, bayes_summary: dict) -> list[str]:
+    """Generate static rule-based recommendations as LLM fallback."""
+    recommendations = []
+
+    if metrics_data:
+        health = metrics_data.get("health_status", "unknown")
+        completion_rate = metrics_data.get("completion_rate", 0)
+        blocked = metrics_data.get("blocked_items", 0)
+        overdue = metrics_data.get("overdue_items", 0)
+
+        if health == "critical":
+            recommendations.append(
+                f"Sprint is at risk. Only {completion_rate:.0f}% complete with {blocked} blocked items."
+            )
+            recommendations.append(
+                "Consider: Re-prioritizing blocked items or escalating dependencies."
+            )
+        elif health == "at_risk":
+            recommendations.append(
+                f"Sprint needs attention. {completion_rate:.0f}% complete."
+            )
+
+        if overdue > 0:
+            recommendations.append(f"Overdue Alert: {overdue} items are past their due date.")
+        if blocked > 2:
+            recommendations.append(
+                f"Blocked Items: {blocked} items blocked. Consider a blocker review meeting."
+            )
+
+    if bayes_summary:
+        sow = bayes_summary.get("sow_summary", {})
+        if sow.get("blocked_deliverables", 0) > 0:
+            recommendations.append(
+                f"Bayes Consulting: {sow['blocked_deliverables']} deliverables blocked."
+            )
+        if sow.get("overdue_deliverables", 0) > 0:
+            recommendations.append(
+                f"Bayes Overdue: {sow['overdue_deliverables']} Bayes deliverables overdue."
+            )
+
+    if not recommendations:
+        recommendations.append("Sprint is on track. No immediate actions required.")
+
+    return recommendations
+
+
 async def generate_recommendations(state: SprintPlannerState) -> dict:
-    """Generate recommendations based on sprint status."""
+    """Generate LLM-powered recommendations (with static fallback)."""
     if state.get("error"):
         return {"recommendations": []}
 
     if not state.get("include_recommendations", True):
         return {"recommendations": []}
 
-    recommendations = []
     metrics_data = state.get("metrics", {})
     bayes_summary = state.get("bayes_summary", {})
+    issues = state.get("issues", [])
+    query_type = state.get("query_type", "")
+
+    # Use retrospective prompt if query type is retrospective
+    if query_type == SprintQueryType.RETROSPECTIVE.value:
+        return await _generate_retrospective(state)
+
+    # Try LLM-powered recommendations
+    llm = _get_llm()
+    if not llm:
+        logger.info("No LLM available — using static recommendations")
+        return {"recommendations": _static_recommendations(metrics_data, bayes_summary)}
 
     try:
-        # Check overall sprint health
+        # Build metrics summary
+        metrics_text = "No metrics available."
         if metrics_data:
-            health = metrics_data.get("health_status", "unknown")
-            completion_rate = metrics_data.get("completion_rate", 0)
-            blocked = metrics_data.get("blocked_items", 0)
-            overdue = metrics_data.get("overdue_items", 0)
+            metrics_text = (
+                f"- Completion: {metrics_data.get('completion_rate', 0):.1f}%\n"
+                f"- Velocity: {metrics_data.get('velocity', 0):.2f} points/day\n"
+                f"- Total points: {metrics_data.get('total_story_points', 0)}\n"
+                f"- Completed: {metrics_data.get('completed_story_points', 0)}\n"
+                f"- Blocked: {metrics_data.get('blocked_items', 0)}\n"
+                f"- Overdue: {metrics_data.get('overdue_items', 0)}\n"
+                f"- Days remaining: {metrics_data.get('days_remaining', 0)}\n"
+                f"- Health: {metrics_data.get('health_status', 'unknown')}"
+            )
 
-            if health == "critical":
-                recommendations.append(
-                    f"⚠️ **Critical**: Sprint is at risk. Only {completion_rate:.0f}% complete with {blocked} blocked items."
-                )
-                recommendations.append(
-                    "Consider: Re-prioritizing blocked items or escalating dependencies."
-                )
-            elif health == "at_risk":
-                recommendations.append(
-                    f"⚡ **At Risk**: Sprint needs attention. {completion_rate:.0f}% complete."
-                )
-
-            if overdue > 0:
-                recommendations.append(
-                    f"🔴 **Overdue Alert**: {overdue} items are past their due date."
-                )
-
-            if blocked > 2:
-                recommendations.append(
-                    f"🚧 **Blocked Items**: {blocked} items are blocked. Consider a blocker review meeting."
-                )
-
-        # Check Bayes deliverables
+        # Build Bayes summary
+        bayes_text = "No Bayes data."
         if bayes_summary:
             sow = bayes_summary.get("sow_summary", {})
-            bayes_blocked = sow.get("blocked_deliverables", 0)
-            bayes_overdue = sow.get("overdue_deliverables", 0)
+            bayes_text = (
+                f"- Total deliverables: {sow.get('total_deliverables', 0)}\n"
+                f"- Completed: {sow.get('completed_deliverables', 0)}\n"
+                f"- Blocked: {sow.get('blocked_deliverables', 0)}\n"
+                f"- Overdue: {sow.get('overdue_deliverables', 0)}"
+            )
 
-            if bayes_blocked > 0:
-                recommendations.append(
-                    f"🏭 **Bayes Consulting**: {bayes_blocked} deliverables blocked. "
-                    "May need escalation to Bayes team lead."
-                )
+        # Build issue highlights (top blocked/overdue)
+        highlights = []
+        for issue in issues[:20]:
+            labels = [l.get("name", "").lower() for l in issue.get("labels", [])]
+            if "blocked" in labels or "bayes-blocked" in labels:
+                highlights.append(f"- [BLOCKED] #{issue.get('number')}: {issue.get('title', '')}")
+        issue_text = "\n".join(highlights[:10]) if highlights else "No blocked issues."
 
-            if bayes_overdue > 0:
-                recommendations.append(
-                    f"📅 **Bayes Overdue**: {bayes_overdue} Bayes deliverables are overdue. "
-                    "Review SOW timeline implications."
-                )
+        user_prompt = SPRINT_RECOMMENDATIONS_PROMPT.format(
+            metrics_summary=metrics_text,
+            bayes_summary=bayes_text,
+            issue_highlights=issue_text,
+        )
 
-        # Default positive message if no issues
-        if not recommendations:
-            recommendations.append("✅ Sprint is on track. No immediate actions required.")
+        messages = [
+            SystemMessage(content=SPRINT_RECOMMENDATIONS_SYSTEM_PROMPT),
+            HumanMessage(content=user_prompt),
+        ]
+        response = await llm.ainvoke(messages)
+        content = response.content
 
-        logger.info("Generated %d recommendations", len(recommendations))
+        # Parse JSON
+        json_match = re.search(r"\{", content)
+        if json_match:
+            start = json_match.start()
+            depth = 0
+            in_str = False
+            esc = False
+            end = start
+            for i in range(start, len(content)):
+                c = content[i]
+                if esc:
+                    esc = False
+                    continue
+                if c == "\\":
+                    esc = True
+                    continue
+                if c == '"':
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            parsed = json.loads(content[start:end])
+        else:
+            parsed = json.loads(content.strip())
+
+        recommendations = parsed.get("recommendations", [])
+        logger.info("Generated %d LLM recommendations", len(recommendations))
         return {"recommendations": recommendations}
 
     except Exception as e:
-        logger.error("Failed to generate recommendations: %s", e)
-        return {"recommendations": ["Unable to generate recommendations due to an error."]}
+        logger.warning("LLM recommendations failed, falling back to static: %s", e)
+        return {"recommendations": _static_recommendations(metrics_data, bayes_summary)}
+
+
+async def _generate_retrospective(state: SprintPlannerState) -> dict:
+    """Generate a sprint retrospective using LLM."""
+    metrics_data = state.get("metrics", {})
+    bayes_summary = state.get("bayes_summary", {})
+    issues = state.get("issues", [])
+
+    # Count issue categories
+    completed = sum(1 for i in issues if i.get("state", "").lower() == "closed")
+    blocked = sum(
+        1 for i in issues
+        if any(l.get("name", "").lower() in ("blocked", "bayes-blocked")
+               for l in i.get("labels", []))
+    )
+    in_progress = len(issues) - completed - blocked
+    overdue = metrics_data.get("overdue_items", 0)
+
+    llm = _get_llm()
+    if not llm:
+        return {"recommendations": [
+            "Sprint retrospective requires an LLM. Configure ANTHROPIC_API_KEY or ZAI_API_KEY."
+        ]}
+
+    try:
+        metrics_text = (
+            f"- Completion rate: {metrics_data.get('completion_rate', 0):.1f}%\n"
+            f"- Velocity: {metrics_data.get('velocity', 0):.2f} points/day\n"
+            f"- Health: {metrics_data.get('health_status', 'unknown')}"
+        ) if metrics_data else "No metrics available."
+
+        bayes_text = "No Bayes data."
+        if bayes_summary:
+            sow = bayes_summary.get("sow_summary", {})
+            bayes_text = f"Completed: {sow.get('completed_deliverables', 0)}/{sow.get('total_deliverables', 0)}"
+
+        user_prompt = SPRINT_RETROSPECTIVE_PROMPT.format(
+            metrics_summary=metrics_text,
+            completed_count=completed,
+            in_progress_count=in_progress,
+            blocked_count=blocked,
+            overdue_count=overdue,
+            bayes_summary=bayes_text,
+        )
+
+        messages = [
+            SystemMessage(content=SPRINT_RETROSPECTIVE_SYSTEM_PROMPT),
+            HumanMessage(content=user_prompt),
+        ]
+        response = await llm.ainvoke(messages)
+        content = response.content
+
+        # Parse JSON
+        json_match = re.search(r"\{", content)
+        if json_match:
+            start = json_match.start()
+            depth = 0
+            in_str = False
+            esc = False
+            end = start
+            for i in range(start, len(content)):
+                c = content[i]
+                if esc:
+                    esc = False
+                    continue
+                if c == "\\":
+                    esc = True
+                    continue
+                if c == '"':
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            parsed = json.loads(content[start:end])
+        else:
+            parsed = json.loads(content.strip())
+
+        # Flatten retrospective into recommendations list + store full retro in report
+        retro_recs = parsed.get("recommendations", [])
+        action_items = parsed.get("action_items", [])
+        for item in action_items:
+            retro_recs.append(f"[{item.get('priority', 'medium').upper()}] {item.get('action', '')}")
+
+        # Store full retrospective in report field too
+        return {
+            "recommendations": retro_recs,
+            "report": {
+                "type": "retrospective",
+                "what_went_well": parsed.get("what_went_well", []),
+                "what_didnt_go_well": parsed.get("what_didnt_go_well", []),
+                "action_items": action_items,
+                "recommendations": parsed.get("recommendations", []),
+            },
+        }
+
+    except Exception as e:
+        logger.error("Retrospective generation failed: %s", e)
+        return {"recommendations": [f"Retrospective generation failed: {e}"]}
 
 
 async def generate_report(state: SprintPlannerState) -> dict:
@@ -487,61 +781,65 @@ sprint_planner_graph = build_sprint_planner_graph().compile()
 # ── Convenience Functions ──
 
 
-async def get_sprint_status(repository: str | None = None) -> dict:
-    """Get quick sprint status."""
-    input_state: SprintPlannerState = {
+def _default_state(**overrides: Any) -> SprintPlannerState:
+    """Build a default SprintPlannerState with overrides."""
+    base: SprintPlannerState = {
         "query_type": SprintQueryType.STATUS.value,
-        "repository": repository,
+        "repository": None,
         "sprint_id": None,
         "include_bayes": True,
         "include_recommendations": False,
         "issues": [],
         "project_items": [],
+        "use_projects_v2": False,
+        "sprint_start_date": None,
+        "sprint_end_date": None,
         "metrics": None,
         "report": None,
         "bayes_summary": None,
         "recommendations": [],
         "error": None,
     }
-    result = await sprint_planner_graph.ainvoke(input_state)
+    base.update(overrides)  # type: ignore[arg-type]
+    return base
+
+
+async def get_sprint_status(repository: str | None = None) -> dict:
+    """Get quick sprint status."""
+    result = await sprint_planner_graph.ainvoke(
+        _default_state(query_type=SprintQueryType.STATUS.value, repository=repository)
+    )
     return result.get("metrics", {})
 
 
 async def get_sprint_report(repository: str | None = None, sprint_id: str | None = None) -> dict:
     """Get full sprint report."""
-    input_state: SprintPlannerState = {
-        "query_type": SprintQueryType.REPORT.value,
-        "repository": repository,
-        "sprint_id": sprint_id,
-        "include_bayes": True,
-        "include_recommendations": True,
-        "issues": [],
-        "project_items": [],
-        "metrics": None,
-        "report": None,
-        "bayes_summary": None,
-        "recommendations": [],
-        "error": None,
-    }
-    result = await sprint_planner_graph.ainvoke(input_state)
+    result = await sprint_planner_graph.ainvoke(
+        _default_state(
+            query_type=SprintQueryType.REPORT.value,
+            repository=repository,
+            sprint_id=sprint_id,
+            include_recommendations=True,
+        )
+    )
     return result.get("report", {})
 
 
 async def get_bayes_tracking(repository: str | None = None) -> dict:
     """Get Bayes Consulting deliverable tracking."""
-    input_state: SprintPlannerState = {
-        "query_type": SprintQueryType.BAYES_TRACKING.value,
-        "repository": repository,
-        "sprint_id": None,
-        "include_bayes": True,
-        "include_recommendations": False,
-        "issues": [],
-        "project_items": [],
-        "metrics": None,
-        "report": None,
-        "bayes_summary": None,
-        "recommendations": [],
-        "error": None,
-    }
-    result = await sprint_planner_graph.ainvoke(input_state)
+    result = await sprint_planner_graph.ainvoke(
+        _default_state(query_type=SprintQueryType.BAYES_TRACKING.value, repository=repository)
+    )
     return result.get("bayes_summary", {})
+
+
+async def get_sprint_retrospective(repository: str | None = None) -> dict:
+    """Generate a sprint retrospective."""
+    result = await sprint_planner_graph.ainvoke(
+        _default_state(
+            query_type=SprintQueryType.RETROSPECTIVE.value,
+            repository=repository,
+            include_recommendations=True,
+        )
+    )
+    return result.get("report") or {"recommendations": result.get("recommendations", [])}

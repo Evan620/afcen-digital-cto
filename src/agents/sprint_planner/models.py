@@ -159,6 +159,7 @@ class SprintQueryType(str, Enum):
     VELOCITY = "velocity"  # Velocity analysis
     BLOCKERS = "blockers"  # Blocked items
     OVERDUE = "overdue"  # Overdue items
+    RETROSPECTIVE = "retrospective"  # Sprint retrospective
 
 
 class SprintPlannerInput(BaseModel):

@@ -28,14 +28,40 @@ dependencies = [
     # WebSocket for OpenClaw/JARVIS
     "websockets>=14.0",
 
+    # Scheduler
+    "apscheduler>=3.10.0",
+
     # Configuration
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.0.0",
 
+    # Production: Retry & Resilience
+    "tenacity>=8.5.0",
+
+    # Production: Rate Limiting
+    "slowapi>=0.1.9",
+
+    # Production: Structured Logging
+    "python-json-logger>=2.0.7",
+
+    # Production: Metrics
+    "prometheus-client>=0.21.0",
+
     # Security scanning
     "semgrep>=1.100.0",
+
+    # Phase 4: Docker
+    "docker>=7.0.0",
+
+    # TUI: Terminal User Interface
+    "click>=8.1.0",
+    "questionary>=2.0.0",
+    "rich>=13.0.0",
 ]
+
+[project.scripts]
+cto = "src.tui.cli:main"
 
 [project.optional-dependencies]
 dev = [

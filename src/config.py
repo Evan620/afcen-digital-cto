@@ -65,6 +65,81 @@ class Settings(BaseSettings):
         description="Token for OpenClaw Gateway authentication",
     )
 
+    # ── GitHub Projects V2 ──
+    github_project_number: int = Field(default=0, description="Projects V2 number (0 = disabled)")
+    github_org: str = Field(default="", description="GitHub org for Projects V2")
+
+    # ── Scheduler ──
+    scheduler_enabled: bool = Field(default=True, description="Enable APScheduler automation")
+    daily_standup_cron: str = Field(default="0 8 * * 1-5", description="Daily standup cron (8 AM weekdays)")
+    weekly_report_cron: str = Field(default="0 9 * * 1", description="Weekly report cron (9 AM Monday)")
+    bayes_alert_cron: str = Field(default="0 10 * * 1,3,5", description="Bayes alert cron (MWF 10 AM)")
+
+    # ── Phase 3: Market Scanner ──
+    market_scan_enabled: bool = Field(default=True, description="Enable market data collection")
+    morning_brief_enabled: bool = Field(default=True, description="Enable morning brief generation")
+    market_scan_cron: str = Field(default="0 3 * * *", description="Market scan cron (3 AM daily)")
+    morning_brief_cron: str = Field(default="0 6 * * *", description="Morning brief cron (6 AM daily)")
+
+    # ── Phase 3: Market Data Sources ──
+    feedly_api_key: str = Field(default="", description="Feedly API key for news aggregation")
+    world_bank_api_key: str = Field(default="", description="World Bank Projects API key")
+    verra_api_key: str = Field(default="", description="Verra Registry API key")
+    gold_standard_api_key: str = Field(default="", description="Gold Standard Registry API key")
+    twitter_api_key: str = Field(default="", description="Twitter/X API key for social listening")
+    openalex_api_key: str = Field(default="", description="OpenAlex API key for research papers")
+
+    # ── Phase 3: Meeting Intelligence ──
+    recall_api_key: str = Field(default="", description="Recall.ai API key for meeting bots")
+    assemblyai_api_key: str = Field(default="", description="AssemblyAI API key for transcript analysis")
+    deepgram_api_key: str = Field(default="", description="Deepgram API key for real-time STT")
+    elevenlabs_api_key: str = Field(default="", description="ElevenLabs API key for TTS")
+
+    # ── Phase 4: Coding Agents ──
+    coding_enabled: bool = Field(default=True, description="Enable coding agent execution")
+    claude_code_enabled: bool = Field(default=True, description="Enable Claude Code integration")
+    coding_timeout: int = Field(default=300, description="Coding task timeout in seconds")
+    coding_sandbox_image: str = Field(
+        default="mcr.microsoft.com/devcontainers/base:ubuntu",
+        description="Docker image for coding sandbox",
+    )
+    coding_workspace_path: str = Field(default="/tmp/workspace", description="Path for coding workspaces")
+
+    # ── Phase 4: Knowledge Graph ──
+    knowledge_graph_enabled: bool = Field(default=True, description="Enable knowledge graph")
+    knowledge_graph_name: str = Field(default="afcen_knowledge", description="Name of Apache AGE graph")
+
+    # ── Phase 4: A2A Protocol ──
+    a2a_enabled: bool = Field(default=True, description="Enable A2A protocol")
+    a2a_agent_discovery: bool = Field(default=True, description="Enable automatic agent discovery")
+    a2a_known_agents: list[str] = Field(
+        default_factory=list,
+        description="List of known A2A agent endpoints",
+    )
+    a2a_shared_secret: str = Field(default="", description="Shared secret for A2A message signing")
+
+    # ── Production: Security ──
+    digital_cto_api_keys: str = Field(
+        default="",
+        description="Comma-separated API keys for client authentication (production)",
+    )
+    require_auth: bool = Field(
+        default=False,
+        description="Require API key authentication for all endpoints",
+    )
+    rate_limit_enabled: bool = Field(
+        default=True,
+        description="Enable rate limiting for API endpoints",
+    )
+    rate_limit_per_minute: int = Field(
+        default=60,
+        description="Requests per minute per IP for rate limiting",
+    )
+
+    # ── Production: Retry Configuration ──
+    retry_max_attempts: int = Field(default=3, description="Maximum retry attempts for transient failures")
+    retry_base_delay: float = Field(default=1.0, description="Base delay for exponential backoff (seconds)")
+
     @property
     def monitored_repos(self) -> list[str]:
         """Parse comma-separated repo list into a list of 'owner/repo' strings."""
@@ -83,6 +158,10 @@ class Settings(BaseSettings):
     @property
     def has_zai(self) -> bool:
         return bool(self.zai_api_key)
+
+    @property
+    def has_projects_v2(self) -> bool:
+        return bool(self.github_org and self.github_project_number > 0)
 
 
 # Singleton instance — import this everywhere

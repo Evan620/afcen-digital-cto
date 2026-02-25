@@ -22,7 +22,11 @@ class GitHubClient:
 
     def __init__(self, token: str | None = None, webhook_secret: str | None = None) -> None:
         self._token = token or settings.github_token
-        self._webhook_secret = webhook_secret or settings.github_webhook_secret
+        # Allow explicitly setting webhook_secret to empty string to disable verification
+        if webhook_secret == "":
+            self._webhook_secret = ""
+        else:
+            self._webhook_secret = webhook_secret or settings.github_webhook_secret
         self._github: Github | None = None
 
     @property
@@ -271,3 +275,134 @@ class GitHubClient:
             return True
         except Exception:
             return False
+
+    # ── Branch & PR Creation (Phase 4) ──
+
+    def create_branch(
+        self,
+        repo_full_name: str,
+        branch_name: str,
+        source_sha: str | None = None
+    ) -> dict:
+        """Create a new branch in the repository.
+
+        Args:
+            repo_full_name: 'owner/repo'
+            branch_name: Name for the new branch
+            source_sha: Commit SHA to branch from (defaults to main branch tip)
+
+        Returns:
+            Dict with branch info
+        """
+        try:
+            repo = self.github.get_repo(repo_full_name)
+
+            # Get default branch SHA if not specified
+            if source_sha is None:
+                source_sha = repo.get_branch(repo.default_branch).commit.sha
+
+            # Create the branch reference
+            ref = repo.create_git_ref(
+                ref=f"refs/heads/{branch_name}",
+                sha=source_sha
+            )
+
+            logger.info(f"Created branch {branch_name} in {repo_full_name}")
+            return {
+                "name": branch_name,
+                "sha": ref.object.sha,
+                "url": ref.url,
+            }
+        except GithubException as e:
+            logger.error(f"Failed to create branch: {e}")
+            raise
+
+    def create_pull_request(
+        self,
+        repo_full_name: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str = "main",
+        draft: bool = False,
+    ) -> dict:
+        """Create a pull request.
+
+        Args:
+            repo_full_name: 'owner/repo'
+            title: PR title
+            body: PR description (markdown)
+            head: Source branch name
+            base: Target branch name
+            draft: Whether to create as draft PR
+
+        Returns:
+            Dict with PR details (number, html_url, state, etc.)
+        """
+        try:
+            repo = self.github.get_repo(repo_full_name)
+
+            pr = repo.create_pull(
+                title=title,
+                body=body,
+                head=head,
+                base=base,
+                draft=draft
+            )
+
+            logger.info(f"Created PR #{pr.number} in {repo_full_name}")
+            return {
+                "number": pr.number,
+                "html_url": pr.html_url,
+                "state": pr.state,
+                "draft": pr.draft,
+                "created_at": pr.created_at.isoformat() if pr.created_at else None,
+            }
+        except GithubException as e:
+            logger.error(f"Failed to create PR: {e}")
+            raise
+
+    def get_file_content_at_sha(
+        self,
+        repo_full_name: str,
+        file_path: str,
+        sha: str
+    ) -> str:
+        """Get file content at a specific commit SHA.
+
+        Args:
+            repo_full_name: 'owner/repo'
+            file_path: Path to file in repo
+            sha: Commit SHA
+
+        Returns:
+            File content as string
+        """
+        try:
+            repo = self.github.get_repo(repo_full_name)
+            contents = repo.get_contents(file_path, ref=sha)
+
+            if isinstance(contents, list):
+                # Directory requested
+                return ""
+
+            return contents.decoded_content.decode("utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to get {file_path} at {sha}: {e}")
+            return ""
+
+    def get_default_branch_sha(self, repo_full_name: str) -> str | None:
+        """Get the latest commit SHA from the default branch.
+
+        Args:
+            repo_full_name: 'owner/repo'
+
+        Returns:
+            Commit SHA or None
+        """
+        try:
+            repo = self.github.get_repo(repo_full_name)
+            return repo.get_branch(repo.default_branch).commit.sha
+        except Exception as e:
+            logger.warning(f"Failed to get default branch SHA: {e}")
+            return None
