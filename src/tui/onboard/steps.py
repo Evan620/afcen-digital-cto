@@ -189,6 +189,8 @@ def step_llm_config(config: TUIConfig) -> TUIConfig:
             env_key = env_key_map.get(selected)
             if env_key:
                 _write_env_key(env_key, stripped)
+                # Also set the preferred provider so backend respects this choice
+                _write_env_key("PREFERRED_LLM_PROVIDER", selected)
             print()
             print(success(f"    ✓ API key written to .env ({len(stripped)} chars)!"))
     else:
@@ -382,14 +384,14 @@ def step_backend_config(config: TUIConfig) -> TUIConfig:
 
     # Offer to start Docker
     print()
-    if confirm("     Start backend with 'docker compose up -d'?", default=True):
+    if confirm("     Start backend with 'docker-compose up -d'?", default=True):
         project_root = _find_project_root()
         print()
         print(muted("    Starting Docker containers..."))
 
         try:
             result = subprocess.run(
-                ["docker", "compose", "up", "-d"],
+                ["docker-compose", "up", "-d"],
                 cwd=str(project_root),
                 capture_output=True,
                 text=True,
@@ -398,14 +400,14 @@ def step_backend_config(config: TUIConfig) -> TUIConfig:
             if result.returncode == 0:
                 print(success("    ✓ Docker containers started!"))
             else:
-                print(warning(f"    ⚠ docker compose exited with code {result.returncode}"))
+                print(warning(f"    ⚠ docker-compose exited with code {result.returncode}"))
                 if result.stderr:
                     for line in result.stderr.strip().splitlines()[:5]:
                         print(muted(f"      {line}"))
         except FileNotFoundError:
-            print(warning("    ⚠ 'docker' not found. Install Docker to use the backend."))
+            print(warning("    ⚠ 'docker-compose' not found. Install Docker to use the backend."))
         except subprocess.TimeoutExpired:
-            print(warning("    ⚠ Docker startup timed out (120s). Check 'docker compose logs'."))
+            print(warning("    ⚠ Docker startup timed out (120s). Check 'docker-compose logs'."))
 
         # Poll /health until healthy (up to 60s)
         print()
@@ -431,10 +433,10 @@ def step_backend_config(config: TUIConfig) -> TUIConfig:
             print(success("    ✓ Backend is healthy!"))
         else:
             print(warning("    ⚠ Backend not reachable after 60s."))
-            print(muted("      You can start it later: docker compose up -d"))
+            print(muted("      You can start it later: docker-compose up -d"))
     else:
         print()
-        print(muted("    Skipped Docker startup. Start manually: docker compose up -d"))
+        print(muted("    Skipped Docker startup. Start manually: docker-compose up -d"))
 
     return config
 

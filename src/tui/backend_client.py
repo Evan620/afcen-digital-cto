@@ -71,19 +71,186 @@ class BackendClient:
             resp.raise_for_status()
             return resp.json()
 
-    # ── Agent-specific endpoints ──
+    # ── Sprint ──
 
-    async def sprint_status(self) -> dict[str, Any]:
+    async def sprint_status(self, repository: str | None = None) -> dict[str, Any]:
         """Get sprint status (GET /sprint/status)."""
+        params = {}
+        if repository:
+            params["repository"] = repository
         async with self._client() as client:
-            resp = await client.get("/sprint/status")
+            resp = await client.get("/sprint/status", params=params)
             resp.raise_for_status()
             return resp.json()
 
-    async def devops_status(self) -> dict[str, Any]:
-        """Get DevOps pipeline status (GET /devops/status)."""
+    async def sprint_report(self, repository: str | None = None) -> dict[str, Any]:
+        """Get comprehensive sprint report (GET /sprint/report)."""
+        params = {}
+        if repository:
+            params["repository"] = repository
         async with self._client() as client:
-            resp = await client.get("/devops/status")
+            resp = await client.get("/sprint/report", params=params)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def sprint_bayes(self, repository: str | None = None) -> dict[str, Any]:
+        """Get Bayes deliverable tracking (GET /sprint/bayes)."""
+        params = {}
+        if repository:
+            params["repository"] = repository
+        async with self._client() as client:
+            resp = await client.get("/sprint/bayes", params=params)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def sprint_retrospective(self, repository: str | None = None) -> dict[str, Any]:
+        """Get sprint retrospective (GET /sprint/retrospective)."""
+        params = {}
+        if repository:
+            params["repository"] = repository
+        async with self._client() as client:
+            resp = await client.get("/sprint/retrospective", params=params)
+            resp.raise_for_status()
+            return resp.json()
+
+    # ── Architecture ──
+
+    async def architecture_query(
+        self,
+        query: str,
+        query_type: str = "technology_evaluation",
+        repository: str | None = None,
+    ) -> dict[str, Any]:
+        """Submit architecture evaluation (POST /architecture/query)."""
+        payload: dict[str, Any] = {"query": query, "query_type": query_type}
+        if repository:
+            payload["repository"] = repository
+        async with self._client() as client:
+            resp = await client.post("/architecture/query", json=payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def architecture_decisions(self, limit: int = 10) -> dict[str, Any]:
+        """List recent architecture decisions (GET /architecture/decisions)."""
+        async with self._client() as client:
+            resp = await client.get("/architecture/decisions", params={"limit": limit})
+            resp.raise_for_status()
+            return resp.json()
+
+    # ── DevOps ──
+
+    async def devops_status(self, repository: str | None = None) -> dict[str, Any]:
+        """Get DevOps pipeline status (GET /devops/status)."""
+        params = {}
+        if repository:
+            params["repository"] = repository
+        async with self._client() as client:
+            resp = await client.get("/devops/status", params=params)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def devops_report(self, repository: str | None = None) -> dict[str, Any]:
+        """Get full DevOps health report (GET /devops/report)."""
+        params = {}
+        if repository:
+            params["repository"] = repository
+        async with self._client() as client:
+            resp = await client.get("/devops/report", params=params)
+            resp.raise_for_status()
+            return resp.json()
+
+    # ── Market Scanner ──
+
+    async def market_status(self) -> dict[str, Any]:
+        """Get market scanner status (GET /market/status)."""
+        async with self._client() as client:
+            resp = await client.get("/market/status")
+            resp.raise_for_status()
+            return resp.json()
+
+    async def market_intel(self, hours: int = 24, limit: int = 50) -> dict[str, Any]:
+        """Get recent market intelligence (GET /market/intel)."""
+        async with self._client() as client:
+            resp = await client.get("/market/intel", params={"hours": hours, "limit": limit})
+            resp.raise_for_status()
+            return resp.json()
+
+    async def market_scan(self, hours_back: int = 24) -> dict[str, Any]:
+        """Trigger market data collection (POST /market/scan)."""
+        async with self._client() as client:
+            resp = await client.post("/market/scan", params={"hours_back": hours_back})
+            resp.raise_for_status()
+            return resp.json()
+
+    async def market_brief(self) -> dict[str, Any]:
+        """Generate morning brief on demand (POST /market/brief)."""
+        async with self._client() as client:
+            resp = await client.post("/market/brief")
+            resp.raise_for_status()
+            return resp.json()
+
+    # ── Meeting Intelligence ──
+
+    async def meeting_status(self) -> dict[str, Any]:
+        """Get meeting intelligence status (GET /meeting/status)."""
+        async with self._client() as client:
+            resp = await client.get("/meeting/status")
+            resp.raise_for_status()
+            return resp.json()
+
+    async def meeting_analyze(
+        self,
+        transcript: str,
+        title: str = "Unknown Meeting",
+        participants: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Analyze a meeting transcript (POST /meeting/analyze)."""
+        async with self._client() as client:
+            resp = await client.post(
+                "/meeting/analyze",
+                json={
+                    "transcript": transcript,
+                    "meeting_title": title,
+                    "participants": participants or [],
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    # ── Coding Agent ──
+
+    async def coding_submit(
+        self,
+        description: str,
+        repository: str,
+        complexity: str = "moderate",
+        requires_testing: bool = True,
+    ) -> dict[str, Any]:
+        """Submit a coding task (POST /coding/task)."""
+        async with self._client() as client:
+            resp = await client.post(
+                "/coding/task",
+                json={
+                    "description": description,
+                    "repository": repository,
+                    "complexity": complexity,
+                    "requires_testing": requires_testing,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def coding_status(self, task_id: str) -> dict[str, Any]:
+        """Get coding task status (GET /coding/status/{task_id})."""
+        async with self._client() as client:
+            resp = await client.get(f"/coding/status/{task_id}")
+            resp.raise_for_status()
+            return resp.json()
+
+    async def coding_history(self, limit: int = 20) -> dict[str, Any]:
+        """Get coding task history (GET /coding/history)."""
+        async with self._client() as client:
+            resp = await client.get("/coding/history", params={"limit": limit})
             resp.raise_for_status()
             return resp.json()
 

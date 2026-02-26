@@ -375,6 +375,410 @@ class GenericNewsScraper:
             return None
 
 
+# ── Verra Carbon Registry ──
+
+
+class VerraRegistryClient:
+    """Collect carbon credit project data from the Verra VCS registry.
+
+    Targets the public search at https://registry.verra.org/app/search/VCS
+    """
+
+    BASE_URL = "https://registry.verra.org/app/search/VCS"
+
+    # East African countries relevant to AfCEN
+    COUNTRIES = ["Kenya", "Ethiopia", "Tanzania", "Uganda", "Rwanda", "Burundi"]
+
+    def __init__(self):
+        self.client = httpx.AsyncClient(timeout=45.0)  # Verra can be slow
+        self._seen_ids: set[str] = set()
+
+    async def collect_updates(self, days_back: int = 30) -> list[CarbonMarketUpdate]:
+        """Collect recent carbon project updates from Verra registry.
+
+        Args:
+            days_back: Look for projects updated in last N days
+        """
+        updates: list[CarbonMarketUpdate] = []
+
+        for country in self.COUNTRIES:
+            try:
+                params = {
+                    "q": "",
+                    "country": country,
+                    "format": "json",
+                    "limit": 50,
+                }
+
+                response = await self.client.get(self.BASE_URL, params=params)
+                response.raise_for_status()
+
+                # Try JSON first, fall back to HTML parsing
+                projects = self._parse_response(response, country)
+                updates.extend(projects)
+
+                logger.info("Collected %d Verra projects for %s", len(projects), country)
+
+            except Exception as e:
+                logger.error("Failed to collect Verra projects for %s: %s", country, e)
+
+        await self.client.aclose()
+        return updates
+
+    def _parse_response(self, response: httpx.Response, country: str) -> list[CarbonMarketUpdate]:
+        """Parse Verra response, trying JSON first then HTML fallback."""
+        projects: list[CarbonMarketUpdate] = []
+
+        # Try JSON parsing
+        try:
+            data = response.json()
+            records = data if isinstance(data, list) else data.get("records", data.get("results", []))
+            for record in records:
+                update = self._parse_project(record, country)
+                if update:
+                    projects.append(update)
+            return projects
+        except Exception:
+            pass
+
+        # HTML fallback — extract project info from table rows
+        try:
+            import re
+            from html import unescape
+
+            text = unescape(response.text)
+            # Look for project IDs in the HTML
+            project_ids = re.findall(r"VCS-?(\d+)", text)
+            for pid in project_ids[:20]:  # Limit
+                project_id = f"VCS-{pid}"
+                if project_id not in self._seen_ids:
+                    self._seen_ids.add(project_id)
+                    projects.append(
+                        CarbonMarketUpdate(
+                            registry="Verra",
+                            project_id=project_id,
+                            project_name=f"VCS Project {pid}",
+                            project_type="VCS",
+                            country=country,
+                            update_type="Listed",
+                        )
+                    )
+        except Exception as e:
+            logger.debug("Verra HTML parsing failed for %s: %s", country, e)
+
+        return projects
+
+    def _parse_project(self, record: dict[str, Any], country: str) -> CarbonMarketUpdate | None:
+        """Parse a single Verra project record into a CarbonMarketUpdate."""
+        try:
+            project_id = str(record.get("resourceIdentifier", record.get("id", "")))
+            if not project_id or project_id in self._seen_ids:
+                return None
+            self._seen_ids.add(project_id)
+
+            # Parse announcement/issuance date
+            date_str = record.get("creditingPeriodStartDate") or record.get("createdAt")
+            announcement_date = None
+            if date_str:
+                try:
+                    announcement_date = datetime.fromisoformat(str(date_str).replace("Z", "+00:00").replace("T", " ").split("+")[0])
+                except Exception:
+                    pass
+
+            return CarbonMarketUpdate(
+                registry="Verra",
+                project_id=project_id,
+                project_name=record.get("resourceName", record.get("name", f"VCS Project {project_id}")),
+                project_type=record.get("methodology", record.get("type", "VCS")),
+                country=country,
+                update_type=record.get("status", "Listed"),
+                credits_issued=record.get("estimatedAnnualReduction") or record.get("creditsIssued"),
+                vintage_year=record.get("vintageYear"),
+                announcement_date=announcement_date,
+                url=f"https://registry.verra.org/app/projectDetail/VCS/{project_id}",
+            )
+
+        except Exception as e:
+            logger.debug("Failed to parse Verra project: %s", e)
+            return None
+
+
+# ── Gold Standard Registry ──
+
+
+class GoldStandardClient:
+    """Collect carbon credit project data from the Gold Standard registry.
+
+    Targets the public listing at https://registry.goldstandard.org/projects
+    """
+
+    BASE_URL = "https://registry.goldstandard.org/projects"
+
+    COUNTRIES = ["Kenya", "Ethiopia", "Tanzania", "Uganda", "Rwanda"]
+
+    def __init__(self):
+        self.client = httpx.AsyncClient(timeout=45.0)
+        self._seen_ids: set[str] = set()
+
+    async def collect_updates(self, days_back: int = 30) -> list[CarbonMarketUpdate]:
+        """Collect recent carbon project updates from Gold Standard registry.
+
+        Args:
+            days_back: Look for projects updated in last N days
+        """
+        updates: list[CarbonMarketUpdate] = []
+
+        for country in self.COUNTRIES:
+            try:
+                params = {
+                    "q": country,
+                    "limit": 50,
+                }
+
+                response = await self.client.get(self.BASE_URL, params=params)
+                response.raise_for_status()
+
+                projects = self._parse_response(response, country)
+                updates.extend(projects)
+
+                logger.info("Collected %d Gold Standard projects for %s", len(projects), country)
+
+            except Exception as e:
+                logger.error("Failed to collect Gold Standard projects for %s: %s", country, e)
+
+        await self.client.aclose()
+        return updates
+
+    def _parse_response(self, response: httpx.Response, country: str) -> list[CarbonMarketUpdate]:
+        """Parse Gold Standard response, trying JSON first then HTML fallback."""
+        projects: list[CarbonMarketUpdate] = []
+
+        # Try JSON parsing
+        try:
+            data = response.json()
+            records = data if isinstance(data, list) else data.get("data", data.get("results", []))
+            for record in records:
+                update = self._parse_project(record, country)
+                if update:
+                    projects.append(update)
+            return projects
+        except Exception:
+            pass
+
+        # HTML fallback
+        try:
+            import re
+            from html import unescape
+
+            text = unescape(response.text)
+            project_ids = re.findall(r"GS-?(\d+)", text)
+            for pid in project_ids[:20]:
+                project_id = f"GS-{pid}"
+                if project_id not in self._seen_ids:
+                    self._seen_ids.add(project_id)
+                    projects.append(
+                        CarbonMarketUpdate(
+                            registry="Gold Standard",
+                            project_id=project_id,
+                            project_name=f"Gold Standard Project {pid}",
+                            project_type="GS-VER",
+                            country=country,
+                            update_type="Listed",
+                        )
+                    )
+        except Exception as e:
+            logger.debug("Gold Standard HTML parsing failed for %s: %s", country, e)
+
+        return projects
+
+    def _parse_project(self, record: dict[str, Any], country: str) -> CarbonMarketUpdate | None:
+        """Parse a single Gold Standard project record."""
+        try:
+            project_id = str(record.get("id", record.get("gsId", "")))
+            if not project_id or project_id in self._seen_ids:
+                return None
+            self._seen_ids.add(project_id)
+
+            date_str = record.get("registrationDate") or record.get("createdAt")
+            announcement_date = None
+            if date_str:
+                try:
+                    announcement_date = datetime.fromisoformat(str(date_str).replace("Z", "+00:00").replace("T", " ").split("+")[0])
+                except Exception:
+                    pass
+
+            return CarbonMarketUpdate(
+                registry="Gold Standard",
+                project_id=project_id,
+                project_name=record.get("name", record.get("title", f"GS Project {project_id}")),
+                project_type=record.get("methodology", record.get("type", "GS-VER")),
+                country=country,
+                update_type=record.get("status", "Listed"),
+                credits_issued=record.get("creditsIssued") or record.get("estimatedReduction"),
+                vintage_year=record.get("vintageYear"),
+                announcement_date=announcement_date,
+                url=f"https://registry.goldstandard.org/projects/details/{project_id}",
+            )
+
+        except Exception as e:
+            logger.debug("Failed to parse Gold Standard project: %s", e)
+            return None
+
+
+# ── African Development Bank Projects ──
+
+
+class AfDBClient:
+    """Collect DFI opportunities from the African Development Bank projects portal.
+
+    Targets: https://projectsportal.afdb.org/dataportal/VProject/ongoingProjects
+    """
+
+    BASE_URL = "https://projectsportal.afdb.org/dataportal/VProject/ongoingProjects"
+
+    COUNTRIES = ["Kenya", "Ethiopia", "Tanzania", "Uganda", "Rwanda", "Burundi"]
+
+    SECTORS = [
+        "Energy",
+        "Agriculture",
+        "Environment",
+        "Water",
+        "Transport",
+        "Multi-Sector",
+    ]
+
+    def __init__(self):
+        self.client = httpx.AsyncClient(timeout=45.0)
+
+    async def collect_opportunities(self, days_back: int = 30) -> list[DFIOpportunity]:
+        """Collect recently updated AfDB project opportunities.
+
+        Args:
+            days_back: Look for projects updated in last N days
+        """
+        opportunities: list[DFIOpportunity] = []
+        cutoff = datetime.utcnow() - timedelta(days=days_back)
+
+        for country in self.COUNTRIES:
+            try:
+                params = {
+                    "country": country,
+                    "format": "json",
+                    "limit": 50,
+                }
+
+                response = await self.client.get(self.BASE_URL, params=params)
+                response.raise_for_status()
+
+                projects = self._parse_response(response, country, cutoff)
+                opportunities.extend(projects)
+
+                logger.info("Collected %d AfDB opportunities for %s", len(projects), country)
+
+            except Exception as e:
+                logger.error("Failed to collect AfDB projects for %s: %s", country, e)
+
+        await self.client.aclose()
+        return opportunities
+
+    def _parse_response(
+        self, response: httpx.Response, country: str, cutoff: datetime
+    ) -> list[DFIOpportunity]:
+        """Parse AfDB response, trying JSON first then HTML fallback."""
+        projects: list[DFIOpportunity] = []
+
+        # Try JSON parsing
+        try:
+            data = response.json()
+            records = data if isinstance(data, list) else data.get("results", data.get("projects", []))
+            for record in records:
+                opp = self._parse_project(record, country, cutoff)
+                if opp:
+                    projects.append(opp)
+            return projects
+        except Exception:
+            pass
+
+        # HTML fallback — extract project info
+        try:
+            import re
+            from html import unescape
+
+            text = unescape(response.text)
+            # Look for project identifiers
+            project_ids = re.findall(r"P-([A-Z]{2}-\w+-\d+)", text)
+            for pid in project_ids[:20]:
+                projects.append(
+                    DFIOpportunity(
+                        source="AfDB",
+                        project_id=f"P-{pid}",
+                        title=f"AfDB Project {pid}",
+                        description=f"African Development Bank project in {country}",
+                        sector="Multi-Sector",
+                        country=country,
+                        status="Active",
+                        relevance_score=0.6,
+                    )
+                )
+        except Exception as e:
+            logger.debug("AfDB HTML parsing failed for %s: %s", country, e)
+
+        return projects
+
+    def _parse_project(
+        self, record: dict[str, Any], country: str, cutoff: datetime
+    ) -> DFIOpportunity | None:
+        """Parse a single AfDB project record into a DFIOpportunity."""
+        try:
+            project_id = str(record.get("projectId", record.get("id", "")))
+            if not project_id:
+                return None
+
+            # Parse approval date
+            date_str = record.get("approvalDate") or record.get("boardApprovalDate")
+            approval_date = None
+            if date_str:
+                try:
+                    approval_date = datetime.fromisoformat(str(date_str).replace("Z", "+00:00").replace("T", " ").split("+")[0])
+                except Exception:
+                    pass
+
+            # Filter by date if we have one
+            if approval_date and approval_date < cutoff:
+                return None
+
+            # Filter by sector
+            sector = record.get("sector", record.get("sectorName", ""))
+            if sector and not any(s.lower() in sector.lower() for s in self.SECTORS):
+                return None
+
+            # Filter by country
+            project_country = record.get("country", record.get("countryName", country))
+            if not any(c.lower() in str(project_country).lower() for c in self.COUNTRIES):
+                return None
+
+            funding = record.get("approvedAmount") or record.get("totalCost")
+            funding_amount = f"${funding:,.0f}" if isinstance(funding, (int, float)) else str(funding) if funding else None
+
+            return DFIOpportunity(
+                source="AfDB",
+                project_id=project_id,
+                title=record.get("projectName", record.get("title", f"AfDB Project {project_id}")),
+                description=record.get("description", record.get("objective", f"AfDB project in {country}")),
+                sector=sector or "Multi-Sector",
+                country=project_country if isinstance(project_country, str) else country,
+                funding_amount=funding_amount,
+                status=record.get("status", "Active"),
+                approval_date=approval_date,
+                url=record.get("url", f"https://projectsportal.afdb.org/dataportal/VProject/show/{project_id}"),
+                relevance_score=0.7,
+            )
+
+        except Exception as e:
+            logger.debug("Failed to parse AfDB project: %s", e)
+            return None
+
+
 # ── Market Intel Storage ──
 
 
@@ -557,6 +961,37 @@ async def collect_all_sources(hours_back: int = 24) -> dict[str, Any]:
         results["sources_failed"]["World Bank"] = str(e)
         logger.error("World Bank collection failed: %s", e)
 
-    # TODO: Add more sources (Verra, Gold Standard, Twitter, etc.)
+    # Verra Carbon Registry
+    try:
+        verra_client = VerraRegistryClient()
+        verra_updates = await verra_client.collect_updates(days_back=30)
+        results["carbon_updates"].extend(verra_updates)
+        results["sources_succeeded"].append("Verra Registry")
+        logger.info("Collected %d Verra carbon updates", len(verra_updates))
+    except Exception as e:
+        results["sources_failed"]["Verra Registry"] = str(e)
+        logger.error("Verra collection failed: %s", e)
+
+    # Gold Standard Registry
+    try:
+        gs_client = GoldStandardClient()
+        gs_updates = await gs_client.collect_updates(days_back=30)
+        results["carbon_updates"].extend(gs_updates)
+        results["sources_succeeded"].append("Gold Standard")
+        logger.info("Collected %d Gold Standard carbon updates", len(gs_updates))
+    except Exception as e:
+        results["sources_failed"]["Gold Standard"] = str(e)
+        logger.error("Gold Standard collection failed: %s", e)
+
+    # African Development Bank
+    try:
+        afdb_client = AfDBClient()
+        afdb_opps = await afdb_client.collect_opportunities(days_back=30)
+        results["dfi_opportunities"].extend(afdb_opps)
+        results["sources_succeeded"].append("AfDB")
+        logger.info("Collected %d AfDB opportunities", len(afdb_opps))
+    except Exception as e:
+        results["sources_failed"]["AfDB"] = str(e)
+        logger.error("AfDB collection failed: %s", e)
 
     return results

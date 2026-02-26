@@ -84,10 +84,16 @@ class QualityGate:
         """
         if not result.files_modified:
             return QualityGateResult(
-                passed=True,
-                verdict="COMMENT",
-                summary="No files were modified. Nothing to review.",
-                feedback="No changes were made by the coding agent.",
+                passed=False,
+                verdict="REQUEST_CHANGES",
+                summary="No files were modified — coding task produced no changes.",
+                feedback=(
+                    "The coding agent completed but made zero file changes. "
+                    "This usually means the executor failed to run (e.g. Docker "
+                    "unavailable, image missing, or Claude Code CLI error). "
+                    f"Executor errors: {'; '.join(result.errors) or 'none reported'}"
+                ),
+                issues=result.errors or ["No files modified by coding agent"],
             )
 
         logger.info(
@@ -190,7 +196,11 @@ class QualityGate:
         }
 
         # Invoke the code review graph
-        review_output = await code_review_graph.ainvoke(review_input)
+        try:
+            review_output = await code_review_graph.ainvoke(review_input)
+        except Exception as e:
+            logger.error("Code review graph failed: %s", e)
+            raise RuntimeError(f"Code review graph invocation failed: {e}")
 
         if review_output.get("review_result"):
             return review_output["review_result"]

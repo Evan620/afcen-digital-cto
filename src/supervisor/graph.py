@@ -395,11 +395,43 @@ async def route_to_coding_agent(state: SupervisorState) -> dict:
     """Execute the Coding agent subgraph."""
     payload = state["payload"]
 
+    # When coming from chat, the payload only has "message" — extract description from it
+    description = payload.get("description", "") or payload.get("message", "")
+    repository = payload.get("repository", "")
+
+    # If no repository specified, we can't execute — return a helpful message
+    if not repository:
+        from src.config import settings as app_settings
+        repos = app_settings.monitored_repos
+        if repos:
+            # Use the first monitored repo as default
+            repository = repos.split(",")[0].strip() if isinstance(repos, str) else repos[0]
+        else:
+            return {
+                "result": {
+                    "agent": "coding_agent",
+                    "message": (
+                        "The Coding Agent needs a target repository. "
+                        "Please specify one, e.g.: 'Write a health check endpoint for afcen/platform'"
+                    ),
+                    "error": None,
+                }
+            }
+
+    if not description:
+        return {
+            "result": {
+                "agent": "coding_agent",
+                "message": "Please describe the coding task you'd like me to work on.",
+                "error": None,
+            }
+        }
+
     # Build the Coding agent's input state
     coding_input = coding_default_state(
         task_id=payload.get("task_id"),
-        description=payload.get("description", ""),
-        repository=payload.get("repository", ""),
+        description=description,
+        repository=repository,
         base_branch=payload.get("base_branch", "main"),
         complexity=CodingComplexity(payload.get("complexity", "moderate")),
         estimated_files=payload.get("estimated_files", 1),
@@ -414,19 +446,27 @@ async def route_to_coding_agent(state: SupervisorState) -> dict:
     try:
         result = await coding_graph.ainvoke(coding_input)
 
+        # CodingAgentState is a Pydantic model — use attribute access, not .get()
+        task_id = coding_input.task.task_id if coding_input.task else "unknown"
+        result_status = result.status if hasattr(result, "status") else str(result)
+
         logger.info(
             "Coding agent complete: task_id=%s, status=%s",
-            coding_input["task"].task_id if coding_input.get("task") else "unknown",
-            result.get("status"),
+            task_id,
+            result_status,
         )
+
+        result_dict = None
+        if hasattr(result, "result") and result.result is not None:
+            result_dict = result.result.to_dict() if hasattr(result.result, "to_dict") else str(result.result)
 
         return {
             "result": {
                 "agent": "coding_agent",
-                "task_id": coding_input.get("task", {}).task_id if coding_input.get("task") else None,
-                "status": result.get("status"),
-                "result": result.get("result").to_dict() if result.get("result") else None,
-                "error": result.get("error"),
+                "task_id": task_id,
+                "status": str(result_status),
+                "result": result_dict,
+                "error": result.error if hasattr(result, "error") else None,
             }
         }
 

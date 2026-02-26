@@ -25,7 +25,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
-from src.agents.coding_agent.executor import ClaudeCodeExecutor, MockCodeExecutor
+from src.agents.coding_agent.executor import (
+    AiderExecutor,
+    ClaudeCodeExecutor,
+    MockCodeExecutor,
+)
 from src.agents.coding_agent.models import (
     CodingAgentState,
     CodingAgentType,
@@ -80,11 +84,14 @@ def _default_state(
         related_pr=related_pr,
     )
 
-    return CodingAgentState(
-        task=task,
-        status=TaskStatus.PENDING,
-        started_at=datetime.utcnow(),
-    )
+    return {
+        "task": task,
+        "status": TaskStatus.PENDING,
+        "started_at": datetime.utcnow(),
+        "needs_retry": False,
+        "error": None,
+        "result": None,
+    }
 
 
 async def execute_coding_task(task: CodingTask) -> CodingResult:
@@ -114,7 +121,7 @@ async def execute_coding_task(task: CodingTask) -> CodingResult:
     )
 
     result_state = await coding_graph.ainvoke(state)
-    result = result_state.get("result")
+    result = result_state.get("result") if isinstance(result_state, dict) else None
 
     if result:
         _task_store[task.task_id] = result
@@ -255,7 +262,15 @@ async def execute_in_sandbox(state: CodingAgentState) -> dict:
         return {"error": "No task to execute"}
 
     # Select executor based on agent type
-    if agent_selection == CodingAgentType.CLAUDE_CODE:
+    if agent_selection == CodingAgentType.AIDER:
+        if settings.coding_enabled:
+            executor = AiderExecutor(
+                timeout=task.timeout_seconds,
+                anthropic_api_key=settings.anthropic_api_key,
+            )
+        else:
+            executor = MockCodeExecutor()
+    elif agent_selection == CodingAgentType.CLAUDE_CODE:
         # Use mock executor if Docker not available
         if settings.coding_enabled:
             executor = ClaudeCodeExecutor(
@@ -270,6 +285,27 @@ async def execute_in_sandbox(state: CodingAgentState) -> dict:
     try:
         # Execute the task
         result = await executor.execute_task(task)
+
+        # Carry over retry_count from previous attempt so the counter
+        # isn't reset to 0 on each retry (which would loop forever).
+        prev_result = state.get("result")
+        if prev_result:
+            result.retry_count = prev_result.retry_count
+
+        # If the executor already marked the task as FAILED, propagate that
+        # instead of blindly advancing to quality gate.
+        if result.status == TaskStatus.FAILED:
+            logger.error(
+                "Task %s execution failed: %s",
+                task.task_id,
+                "; ".join(result.errors) or "unknown error",
+            )
+            return {
+                "result": result,
+                "error": "; ".join(result.errors) or "Executor returned FAILED",
+                "status": TaskStatus.FAILED,
+            }
+
         result.status = TaskStatus.QUALITY_GATE
 
         logger.info(
@@ -368,12 +404,60 @@ async def finalize_result(state: CodingAgentState) -> dict:
     """Finalize the result and update status."""
     result = state.get("result")
     status = state.get("status")
+    task = state.get("task")
 
     if not result:
-        return {"error": "No result to finalize"}
+        # Early failures (e.g. assess_complexity error) may have no result.
+        # Build a minimal FAILED result so we don't crash.
+        error = state.get("error", "Unknown error")
+        result = CodingResult(
+            task_id=task.task_id if task else "unknown",
+            agent_used=CodingAgentType.CLAUDE_CODE,
+            status=TaskStatus.FAILED,
+            errors=[error],
+        )
 
     result.status = status or TaskStatus.COMPLETED
     result.completed_at = datetime.utcnow()
+
+    # Create PR if approved and quality gate passed
+    if status == TaskStatus.APPROVED and task:
+        gate_result_dict = state.get("quality_gate_result")
+        if gate_result_dict:
+            from src.agents.coding_agent.quality_gate import QualityGate, QualityGateResult
+
+            # Auto-generate branch name if not set
+            if not task.branch_name:
+                task.branch_name = f"digital-cto/{task.task_id[:12]}"
+
+            gate_result = QualityGateResult(
+                passed=gate_result_dict.get("passed", False),
+                verdict=gate_result_dict.get("verdict", "COMMENT"),
+                summary=gate_result_dict.get("summary", ""),
+                feedback=gate_result_dict.get("feedback"),
+                issues=gate_result_dict.get("issues"),
+            )
+
+            try:
+                quality_gate = QualityGate()
+                pr_result = await quality_gate.create_pr_if_approved(
+                    task, result, gate_result,
+                )
+                if pr_result.get("success"):
+                    result.pr_number = pr_result.get("pr_number")
+                    logger.info(
+                        "Created PR #%s for task %s",
+                        result.pr_number,
+                        result.task_id,
+                    )
+                else:
+                    logger.warning(
+                        "PR creation skipped for task %s: %s",
+                        result.task_id,
+                        pr_result.get("reason"),
+                    )
+            except Exception as e:
+                logger.warning("Failed to create PR for task %s: %s", result.task_id, e)
 
     # Log to database
     try:
@@ -393,11 +477,12 @@ async def finalize_result(state: CodingAgentState) -> dict:
         logger.warning("Failed to log decision: %s", e)
 
     logger.info(
-        "Task %s finalized: status=%s, files=%d, time=%.1fs",
+        "Task %s finalized: status=%s, files=%d, time=%.1fs, pr=%s",
         result.task_id,
         result.status.value,
         len(result.files_modified),
         result.execution_time_seconds,
+        result.pr_number,
     )
 
     return {"status": TaskStatus.COMPLETED}
@@ -405,14 +490,15 @@ async def finalize_result(state: CodingAgentState) -> dict:
 
 async def handle_error(state: CodingAgentState) -> dict:
     """Handle errors during execution."""
-    error = state.get("error", "Unknown error")
+    error = state.get("error") or "Unknown error"
+    task = state.get("task")
 
     logger.error("Error in coding agent: %s", error)
 
     return {
         "status": TaskStatus.FAILED,
         "result": CodingResult(
-            task_id=state.get("task", {}).task_id if state.get("task") else "unknown",
+            task_id=task.task_id if task else "unknown",
             agent_used=CodingAgentType.CLAUDE_CODE,
             status=TaskStatus.FAILED,
             errors=[error],

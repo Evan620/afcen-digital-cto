@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -67,6 +67,7 @@ class DFIOpportunity(BaseModel):
     funding_amount: Optional[str] = None
     status: str  # e.g., "Open", "Closing Soon", "Closed"
     deadline: Optional[datetime] = None
+    approval_date: Optional[datetime] = None
     url: Optional[str] = None
     relevance_score: float = Field(default=0.5, ge=0.0, le=1.0)
 
@@ -172,23 +173,23 @@ class MarketScannerQueryType(str, Enum):
     SEARCH = "search"  # Search collected intel
 
 
-class MarketScannerState(BaseModel):
+class MarketScannerState(TypedDict, total=False):
     """State for the Market Scanner agent workflow."""
 
-    query_type: MarketScannerQueryType = MarketScannerQueryType.STATUS
-    query: str = ""
-    date_range: Optional[tuple[datetime, datetime]] = None
+    query_type: MarketScannerQueryType
+    query: str
+    date_range: tuple[datetime, datetime] | None
 
     # Collected data
-    intel_items: list[MarketIntelItem] = Field(default_factory=list)
-    dfi_opportunities: list[DFIOpportunity] = Field(default_factory=list)
-    carbon_updates: list[CarbonMarketUpdate] = Field(default_factory=list)
+    intel_items: list[MarketIntelItem]
+    dfi_opportunities: list[DFIOpportunity]
+    carbon_updates: list[CarbonMarketUpdate]
 
     # Output
-    brief: Optional[MorningBrief] = None
-    report: Optional[dict[str, Any]] = None
+    brief: MorningBrief | None
+    report: dict[str, Any] | None
 
     # Error handling
-    error: Optional[str] = None
-    sources_succeeded: list[str] = Field(default_factory=list)
-    sources_failed: dict[str, str] = Field(default_factory=dict)
+    error: str | None
+    sources_succeeded: list[str]
+    sources_failed: dict[str, str]

@@ -215,7 +215,42 @@ def main_menu_loop() -> None:
             from src.tui.main import cmd_doctor
             cmd_doctor()
 
-        else:
-            print()
-            print(warning(f"  🚧 '{choice}' is not yet implemented."))
-            input(muted("    Press Enter to continue..."))
+        elif choice == "review":
+            from src.tui.screens.code_review import show_code_review_screen
+            show_code_review_screen()
+
+        elif choice == "sprint":
+            from src.tui.screens.sprint import show_sprint_screen
+            show_sprint_screen()
+
+        elif choice == "brief":
+            from src.tui.screens.market import show_morning_brief
+            show_morning_brief()
+
+        elif choice == "agent_code_review":
+            from src.tui.screens.code_review import show_code_review_screen
+            show_code_review_screen()
+
+        elif choice == "agent_sprint_planner":
+            from src.tui.screens.sprint import show_sprint_screen
+            show_sprint_screen()
+
+        elif choice == "agent_architecture":
+            from src.tui.screens.architecture import show_architecture_screen
+            show_architecture_screen()
+
+        elif choice == "agent_devops":
+            from src.tui.screens.devops import show_devops_screen
+            show_devops_screen()
+
+        elif choice == "agent_market":
+            from src.tui.screens.market import show_market_screen
+            show_market_screen()
+
+        elif choice == "agent_meeting":
+            from src.tui.screens.meeting import show_meeting_screen
+            show_meeting_screen()
+
+        elif choice == "config":
+            from src.tui.main import cmd_config
+            cmd_config()

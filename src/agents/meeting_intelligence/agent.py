@@ -416,6 +416,21 @@ async def deploy_meeting_bot(meeting_url: str, meeting_title: str = "") -> dict 
         return None
 
 
+async def get_meeting_status() -> dict | None:
+    """Get the current status of meeting intelligence.
+
+    Entry point for the scheduler job.
+    """
+    state = _default_state(query_type=MeetingQueryType.STATUS.value)
+
+    try:
+        result = await meeting_intelligence_graph.ainvoke(state)
+        return result.get("report")
+    except Exception as e:
+        logger.error("Meeting status generation failed: %s", e)
+        return None
+
+
 # ── Cross-Agent Integration Helpers ──
 
 
@@ -425,14 +440,17 @@ async def _get_github_status_for_brief() -> str:
     Returns a formatted string with current sprint status, open PRs, etc.
     """
     try:
-        from src.agents.sprint_planner.agent import _default_state as sprint_default_state, sprint_planner_graph
+        from src.agents.sprint_planner.agent import sprint_planner_graph
         from src.agents.sprint_planner.models import SprintQueryType
 
-        # Query sprint status
-        state = sprint_default_state(
-            query_type=SprintQueryType.STATUS.value,
-            repository=settings.github_repository,
-        )
+        # Build state dict directly (avoids importing private _default_state)
+        state = {
+            "query_type": SprintQueryType.STATUS.value,
+            "repository": getattr(settings, "github_repository", ""),
+            "report": None,
+            "metrics": None,
+            "error": None,
+        }
 
         result = await sprint_planner_graph.ainvoke(state)
 
@@ -484,5 +502,3 @@ async def _get_market_intel_for_brief() -> str:
     except Exception as e:
         logger.debug("Failed to get market intel for brief: %s", e)
         return "Market Intel: Status unavailable"
-        logger.error("Failed to deploy meeting bot: %s", e)
-        return None

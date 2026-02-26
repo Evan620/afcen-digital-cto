@@ -4,11 +4,14 @@ import pytest
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+
 from src.integrations.a2a_handler import (
     AgentCard,
     A2ADirective,
     A2AResponse,
     A2AProtocolHandler,
+    A2A_TYPE_MAP,
     get_digital_cto_agent_card,
 )
 from src.models.schemas import JarvisDirective, JarvisDirectiveType
@@ -155,6 +158,41 @@ class TestA2AResponse:
 
 
 @pytest.mark.asyncio
+class TestA2ADirectiveTypeMapping:
+    """Tests for A2A directive type mapping."""
+
+    def test_type_map_contains_expected_types(self):
+        """Test that the type map has all expected entries."""
+        assert "code_review_request" in A2A_TYPE_MAP
+        assert "code_generation" in A2A_TYPE_MAP
+        assert "sprint_query" in A2A_TYPE_MAP
+        assert "architecture_query" in A2A_TYPE_MAP
+
+    def test_map_code_review_request(self):
+        """Test mapping code_review_request -> pull_request."""
+        handler = A2AProtocolHandler()
+        assert handler.map_directive_type("code_review_request") == "pull_request"
+
+    def test_map_code_generation(self):
+        """Test mapping code_generation -> coding_task."""
+        handler = A2AProtocolHandler()
+        assert handler.map_directive_type("code_generation") == "coding_task"
+
+    def test_map_unknown_type_passthrough(self):
+        """Test that unknown types pass through unchanged."""
+        handler = A2AProtocolHandler()
+        assert handler.map_directive_type("unknown_type") == "unknown_type"
+
+    def test_all_mapped_types_are_strings(self):
+        """Test that all mapped types are valid strings."""
+        for key, value in A2A_TYPE_MAP.items():
+            assert isinstance(key, str)
+            assert isinstance(value, str)
+            assert len(key) > 0
+            assert len(value) > 0
+
+
+@pytest.mark.asyncio
 class TestA2AProtocolHandler:
     """Tests for the A2AProtocolHandler."""
 
@@ -249,6 +287,215 @@ class TestA2AProtocolHandler:
 
 
 @pytest.mark.asyncio
+class TestA2ASendDirective:
+    """Tests for sending directives via A2A protocol."""
+
+    async def test_send_directive_success(self):
+        """Test sending a directive successfully."""
+        handler = A2AProtocolHandler(shared_secret="test_secret")
+
+        directive = A2ADirective(
+            directive_id="send-001",
+            type="architecture_query",
+            payload={"query": "Evaluate FastAPI"},
+            sender="digital_cto",
+            recipient="jarvis",
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "response_to": "send-001",
+            "status": "completed",
+            "result": {"recommendation": "Use FastAPI"},
+        }
+
+        with patch.object(handler.http_client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
+
+            result = await handler.send_directive(
+                "https://jarvis.example.com",
+                directive,
+            )
+
+        assert result is not None
+        assert result.status == "completed"
+        assert result.response_to == "send-001"
+        mock_post.assert_called_once()
+
+    async def test_send_directive_failure(self):
+        """Test handling send directive failure."""
+        handler = A2AProtocolHandler(shared_secret="test_secret")
+
+        directive = A2ADirective(
+            directive_id="send-002",
+            type="test_query",
+            payload={},
+            sender="digital_cto",
+            recipient="jarvis",
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+
+        with patch.object(handler.http_client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
+
+            result = await handler.send_directive(
+                "https://jarvis.example.com",
+                directive,
+            )
+
+        assert result is None
+
+    async def test_send_directive_network_error(self):
+        """Test handling network error when sending directive."""
+        handler = A2AProtocolHandler(shared_secret="test_secret")
+
+        directive = A2ADirective(
+            directive_id="send-003",
+            type="test_query",
+            payload={},
+            sender="digital_cto",
+            recipient="jarvis",
+        )
+
+        with patch.object(handler.http_client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.side_effect = httpx.ConnectError("Connection refused")
+
+            result = await handler.send_directive(
+                "https://unreachable.example.com",
+                directive,
+            )
+
+        assert result is None
+
+    async def test_send_directive_to_jarvis_found(self):
+        """Test send_directive_to_jarvis when JARVIS is discovered."""
+        handler = A2AProtocolHandler(shared_secret="test_secret")
+
+        # Simulate discovered JARVIS agent
+        handler.agent_cards["https://jarvis.example.com"] = {
+            "name": "JARVIS",
+            "version": "1.0",
+        }
+
+        directive = A2ADirective(
+            directive_id="jarvis-001",
+            type="code_review_request",
+            payload={"pr": 42},
+            sender="digital_cto",
+            recipient="jarvis",
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "response_to": "jarvis-001",
+            "status": "completed",
+            "result": {},
+        }
+
+        with patch.object(handler.http_client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
+
+            result = await handler.send_directive_to_jarvis(directive)
+
+        assert result is not None
+        assert result.status == "completed"
+
+    async def test_send_directive_to_jarvis_not_found(self):
+        """Test send_directive_to_jarvis when no JARVIS endpoint found."""
+        handler = A2AProtocolHandler(shared_secret="test_secret")
+        handler.agent_cards = {}  # No agents discovered
+
+        directive = A2ADirective(
+            directive_id="jarvis-002",
+            type="test",
+            payload={},
+            sender="digital_cto",
+            recipient="jarvis",
+        )
+
+        with patch("src.integrations.a2a_handler.settings") as mock_settings:
+            mock_settings.a2a_known_agents = []
+
+            result = await handler.send_directive_to_jarvis(directive)
+
+        assert result is None
+
+
+@pytest.mark.asyncio
+class TestA2ADiscoverAgents:
+    """Tests for agent discovery."""
+
+    async def test_discover_agents_success(self):
+        """Test successful agent discovery."""
+        handler = A2AProtocolHandler()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "type": "agent",
+            "name": "Test Agent",
+            "version": "1.0.0",
+            "description": "A test agent",
+            "capabilities": ["code_review"],
+            "contact": {"webhook_url": "https://test.example.com/webhook"},
+            "protocols": ["a2a"],
+            "authentication": "bearer_token",
+        }
+
+        with patch.object(handler.http_client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = mock_response
+
+            discovered = await handler.discover_agents(["https://test.example.com"])
+
+        assert "https://test.example.com" in discovered
+        assert discovered["https://test.example.com"].name == "Test Agent"
+        assert "code_review" in discovered["https://test.example.com"].capabilities
+
+    async def test_discover_agents_unreachable(self):
+        """Test discovery when agent is unreachable."""
+        handler = A2AProtocolHandler()
+
+        with patch.object(handler.http_client, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = httpx.ConnectError("Connection refused")
+
+            discovered = await handler.discover_agents(["https://unreachable.example.com"])
+
+        assert len(discovered) == 0
+
+    async def test_discover_agents_mixed(self):
+        """Test discovery with some reachable and some unreachable agents."""
+        handler = A2AProtocolHandler()
+
+        mock_success_response = MagicMock()
+        mock_success_response.status_code = 200
+        mock_success_response.json.return_value = {
+            "name": "Agent A",
+            "version": "1.0",
+            "description": "Reachable",
+            "capabilities": [],
+            "contact": {},
+        }
+
+        async def mock_get(url, **kwargs):
+            if "good-agent.example.com" in url:
+                return mock_success_response
+            raise httpx.ConnectError("Connection refused")
+
+        with patch.object(handler.http_client, "get", side_effect=mock_get):
+            discovered = await handler.discover_agents([
+                "https://good-agent.example.com",
+                "https://down-host.example.com",
+            ])
+
+        assert len(discovered) == 1
+        assert "https://good-agent.example.com" in discovered
+
+
+@pytest.mark.asyncio
 class TestDigitalCTOAgentCard:
     """Tests for the Digital CTO agent card."""
 
@@ -274,10 +521,7 @@ class TestDigitalCTOAgentCard:
         """Test that Phase 4 capabilities are included."""
         card = get_digital_cto_agent_card()
 
-        # Phase 4 additions
-        assert "code_generation" in card.capabilities  # Check for exact string
-
-        # Existing capabilities
+        assert "code_generation" in card.capabilities
         assert "code_review" in card.capabilities
         assert "sprint_planning" in card.capabilities
 

@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     zai_base_url: str = Field(default="https://api.z.ai/api/coding/paas/v4", description="z.ai base URL")
     zai_model: str = Field(default="glm-5", description="z.ai model name")
 
+    # ── LLM: Preferred Provider (set by onboarding) ──
+    preferred_llm_provider: str = Field(
+        default="",
+        description="Preferred LLM provider: anthropic, zai, or azure_openai. Empty = auto-detect.",
+    )
+
     # ── GitHub ──
     github_token: str = Field(default="", description="GitHub Personal Access Token")
     github_webhook_secret: str = Field(default="", description="Secret for webhook HMAC verification")
@@ -94,6 +100,8 @@ class Settings(BaseSettings):
     assemblyai_api_key: str = Field(default="", description="AssemblyAI API key for transcript analysis")
     deepgram_api_key: str = Field(default="", description="Deepgram API key for real-time STT")
     elevenlabs_api_key: str = Field(default="", description="ElevenLabs API key for TTS")
+    meeting_intel_enabled: bool = Field(default=True, description="Enable meeting intelligence scheduler jobs")
+    meeting_intel_cron: str = Field(default="0 7 * * 1-5", description="Meeting intel cron (7 AM weekdays)")
 
     # ── Phase 4: Coding Agents ──
     coding_enabled: bool = Field(default=True, description="Enable coding agent execution")

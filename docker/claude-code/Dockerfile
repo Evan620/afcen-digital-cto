@@ -3,26 +3,34 @@
 
 FROM python:3.12-slim
 
-# Install system dependencies including Node.js for Claude Code
+# Install system deps + add GitHub CLI apt source (not in default Debian repos)
 RUN apt-get update && apt-get install -y \
     git \
-    github-cli \
     vim \
     curl \
     wget \
     build-essential \
     jq \
-    nodejs \
-    npm \
     docker.io \
+    gpg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 22 LTS (Debian slim ships outdated nodejs/npm)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI globally
-RUN npm install -g @anthropic-ai/claude-code || \
-    pip install --no-cache-dir claude-code
+RUN npm install -g @anthropic-ai/claude-code
 
-# Verify installation
-RUN which claude || echo "claude command location varied"
+# Verify installations
+RUN claude --version && gh --version && node --version
 
 # Create workspace directory
 WORKDIR /workspace

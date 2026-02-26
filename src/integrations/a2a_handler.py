@@ -163,6 +163,21 @@ class A2AResponse:
 # ── A2A Protocol Handler ──
 
 
+# ── A2A Directive Type Routing ──
+
+# Maps A2A directive types to internal supervisor event types
+A2A_TYPE_MAP: dict[str, str] = {
+    "code_review_request": "pull_request",
+    "code_generation": "coding_task",
+    "sprint_query": "sprint_query",
+    "architecture_query": "architecture_query",
+    "devops_status": "devops_status",
+    "market_scan": "market_scan",
+    "meeting_analysis": "meeting_analysis",
+    "health_check": "health_check",
+}
+
+
 class A2AProtocolHandler:
     """Google Agent-to-Agent protocol handler.
 
@@ -179,6 +194,13 @@ class A2AProtocolHandler:
         self.shared_secret = shared_secret
         self.agent_cards: dict[str, dict[str, Any]] = {}
         self.http_client = httpx.AsyncClient(timeout=30.0)
+
+    def map_directive_type(self, a2a_type: str) -> str:
+        """Map an A2A directive type to an internal supervisor event type.
+
+        Falls back to the original type if no mapping exists.
+        """
+        return A2A_TYPE_MAP.get(a2a_type, a2a_type)
 
     async def discover_agents(self, endpoints: list[str]) -> dict[str, AgentCard]:
         """Discover agents via their agent cards.
@@ -300,6 +322,44 @@ class A2AProtocolHandler:
         except Exception as e:
             logger.error("Error sending directive to %s: %s", recipient_endpoint, e)
             return None
+
+    async def send_directive_to_jarvis(
+        self,
+        directive: A2ADirective,
+    ) -> A2AResponse | None:
+        """Send a directive to JARVIS via A2A protocol.
+
+        Searches discovered agent cards and a2a_known_agents config
+        for a JARVIS endpoint and sends the directive.
+
+        Args:
+            directive: Directive to send
+
+        Returns:
+            A2AResponse if successful, None otherwise
+        """
+        jarvis_endpoint = None
+
+        # Search discovered agent cards for JARVIS
+        for endpoint, card_data in self.agent_cards.items():
+            name = card_data.get("name", "").lower()
+            if "jarvis" in name:
+                jarvis_endpoint = endpoint
+                break
+
+        # Fall back to known agents config
+        if not jarvis_endpoint:
+            for endpoint in settings.a2a_known_agents:
+                if "jarvis" in endpoint.lower():
+                    jarvis_endpoint = endpoint
+                    break
+
+        if not jarvis_endpoint:
+            logger.warning("No JARVIS endpoint found for A2A directive")
+            return None
+
+        logger.info("Sending A2A directive to JARVIS at %s", jarvis_endpoint)
+        return await self.send_directive(jarvis_endpoint, directive)
 
     def _sign_directive(self, directive: A2ADirective) -> str:
         """Sign a directive with HMAC."""

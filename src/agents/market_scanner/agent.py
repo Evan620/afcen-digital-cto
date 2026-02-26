@@ -21,12 +21,18 @@ from src.agents.market_scanner.models import (
     MarketScannerState,
     MorningBrief,
 )
-from src.agents.market_scanner.prompts import get_morning_brief_prompt
+from src.agents.market_scanner.prompts import (
+    get_morning_brief_prompt,
+    INTELLIGENCE_ANALYSIS_PROMPT,
+)
 from src.agents.market_scanner.tools import (
     collect_all_sources,
     MarketIntelStore,
     RSSFeedCollector,
     WorldBankClient,
+    VerraRegistryClient,
+    GoldStandardClient,
+    AfDBClient,
 )
 from src.config import settings
 from src.llm.utils import get_default_llm, extract_json_from_llm_output
@@ -70,6 +76,39 @@ async def collect_data(state: MarketScannerState) -> dict:
     except Exception as e:
         sources_failed["World Bank"] = str(e)
         logger.error("World Bank collection failed: %s", e)
+
+    # Verra Carbon Registry
+    try:
+        verra = VerraRegistryClient()
+        verra_updates = await verra.collect_updates(days_back=30)
+        carbon_updates.extend(verra_updates)
+        sources_succeeded.append("Verra Registry")
+        logger.info("Collected %d Verra carbon updates", len(verra_updates))
+    except Exception as e:
+        sources_failed["Verra Registry"] = str(e)
+        logger.error("Verra collection failed: %s", e)
+
+    # Gold Standard Registry
+    try:
+        gs = GoldStandardClient()
+        gs_updates = await gs.collect_updates(days_back=30)
+        carbon_updates.extend(gs_updates)
+        sources_succeeded.append("Gold Standard")
+        logger.info("Collected %d Gold Standard carbon updates", len(gs_updates))
+    except Exception as e:
+        sources_failed["Gold Standard"] = str(e)
+        logger.error("Gold Standard collection failed: %s", e)
+
+    # African Development Bank
+    try:
+        afdb = AfDBClient()
+        afdb_opps = await afdb.collect_opportunities(days_back=30)
+        dfi_opportunities.extend(afdb_opps)
+        sources_succeeded.append("AfDB")
+        logger.info("Collected %d AfDB opportunities", len(afdb_opps))
+    except Exception as e:
+        sources_failed["AfDB"] = str(e)
+        logger.error("AfDB collection failed: %s", e)
 
     # Store collected intel
     if intel_items:
@@ -138,7 +177,7 @@ async def generate_brief(state: MarketScannerState) -> dict:
         }
 
     try:
-        llm = get_market_scanner_llm()
+        llm = get_default_llm(temperature=0.2)
         prompt = get_morning_brief_prompt(intel_data)
 
         response = await llm.ainvoke(prompt)
@@ -202,6 +241,104 @@ async def generate_brief(state: MarketScannerState) -> dict:
                 "message": str(e),
             },
         }
+
+
+async def enrich_intel(state: MarketScannerState) -> dict:
+    """Enrich intel items with LLM-based categorization using INTELLIGENCE_ANALYSIS_PROMPT.
+
+    Adds relevance scores, tags, region, sector, and organizations to items
+    that don't already have them. Non-fatal on failure — items keep their
+    keyword-based scores.
+    """
+    intel_items = state.get("intel_items", [])
+
+    # Filter to items that need enrichment (no tags or sector)
+    needs_enrichment = [
+        item for item in intel_items
+        if not item.tags and not item.sector
+    ]
+
+    if not needs_enrichment:
+        logger.debug("No intel items need enrichment, skipping")
+        return {}
+
+    # Batch up to 20 items per LLM call to stay within token budget
+    batch = needs_enrichment[:20]
+
+    try:
+        llm = get_default_llm(temperature=0.2)
+
+        # Format items for the prompt
+        items_text = []
+        for i, item in enumerate(batch):
+            items_text.append(
+                f"[{i}] {item.title}: {item.summary[:200]}"
+                f" (source: {item.source_name}, url: {item.url or 'N/A'})"
+            )
+
+        prompt = INTELLIGENCE_ANALYSIS_PROMPT.format(
+            intel_items="\n".join(items_text)
+        )
+
+        response = await llm.ainvoke(prompt)
+        response_text = response.content if hasattr(response, "content") else str(response)
+
+        enrichments = extract_json_from_llm_output(response_text)
+
+        if not enrichments:
+            logger.warning("Failed to parse enrichment response, skipping")
+            return {}
+
+        # Handle both list and dict responses
+        if isinstance(enrichments, dict):
+            enrichment_list = enrichments.get("items", enrichments.get("results", [enrichments]))
+        else:
+            enrichment_list = enrichments
+
+        if not isinstance(enrichment_list, list):
+            enrichment_list = [enrichment_list]
+
+        # Merge enrichments back into items
+        for enrichment in enrichment_list:
+            if not isinstance(enrichment, dict):
+                continue
+
+            # Match by item_id (index) or by title
+            item_id = enrichment.get("item_id")
+            target_item = None
+
+            if item_id is not None:
+                try:
+                    idx = int(item_id) if not isinstance(item_id, int) else item_id
+                    if 0 <= idx < len(batch):
+                        target_item = batch[idx]
+                except (ValueError, TypeError):
+                    pass
+
+            if target_item is None:
+                continue
+
+            # Merge enrichment data
+            if score := enrichment.get("relevance_score"):
+                try:
+                    target_item.relevance_score = float(score)
+                except (ValueError, TypeError):
+                    pass
+            if tags := enrichment.get("tags"):
+                target_item.tags = tags if isinstance(tags, list) else [tags]
+            if region := enrichment.get("region"):
+                target_item.region = region
+            if sector := enrichment.get("sector"):
+                target_item.sector = sector
+            if orgs := enrichment.get("organizations"):
+                target_item.organizations = orgs if isinstance(orgs, list) else [orgs]
+
+        logger.info("Enriched %d intel items via LLM", len(enrichment_list))
+
+    except Exception as e:
+        logger.warning("Intel enrichment failed (non-fatal): %s", e)
+
+    return {"intel_items": intel_items}
 
 
 async def save_brief(state: MarketScannerState) -> dict:
@@ -320,7 +457,7 @@ async def generate_status(state: MarketScannerState) -> dict:
             "query_type": query_type,
             "intel_items_last_24h": len(intel_items),
             "high_relevance_count": sum(1 for i in intel_items if i.relevance_score >= 0.7),
-            "sources_active": ["RSS Feeds", "World Bank"],
+            "sources_active": ["RSS Feeds", "World Bank", "Verra Registry", "Gold Standard", "AfDB"],
             "last_collection": datetime.utcnow().isoformat(),
             "briefs_generated_last_7_days": await store.get_briefs_count_last_7_days(),
         }
@@ -384,7 +521,7 @@ def build_market_scanner_graph() -> StateGraph:
     """Construct the Market Scanner agent as a LangGraph StateGraph.
 
     Workflows:
-    - COLLECT: collect_data → END
+    - COLLECT: collect_data → enrich_intel → END
     - BRIEF: retrieve_intel → generate_brief → save_brief → notify_jarvis → END
     - STATUS: generate_status → END
     """
@@ -395,6 +532,7 @@ def build_market_scanner_graph() -> StateGraph:
 
     # Add workflow nodes
     graph.add_node("collect_data", collect_data)
+    graph.add_node("enrich_intel", enrich_intel)
     graph.add_node("retrieve_intel", retrieve_intel)
     graph.add_node("generate_brief", generate_brief)
     graph.add_node("save_brief", save_brief)
@@ -432,8 +570,11 @@ def build_market_scanner_graph() -> StateGraph:
         "notify_jarvis": "notify_jarvis",
     })
 
+    # Collect workflow: collect_data → enrich_intel → END
+    graph.add_edge("collect_data", "enrich_intel")
+
     # Terminal edges
-    graph.add_edge("collect_data", END)
+    graph.add_edge("enrich_intel", END)
     graph.add_edge("notify_jarvis", END)
     graph.add_edge("generate_status", END)
     graph.add_edge("handle_error", END)

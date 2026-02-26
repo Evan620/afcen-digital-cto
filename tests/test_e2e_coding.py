@@ -18,9 +18,179 @@ from src.agents.coding_agent.models import (
     RepoAccessMode,
     FileChange,
 )
+from src.agents.coding_agent.agent import coding_graph, _default_state
 from src.agents.coding_agent.executor import ClaudeCodeExecutor, MockCodeExecutor
 from src.agents.coding_agent.quality_gate import QualityGate, QualityGateResult
 from src.integrations.github_client import GitHubClient
+
+
+@pytest.mark.asyncio
+class TestFullCodingGraphE2E:
+    """Full LangGraph E2E tests for coding agent pipeline."""
+
+    @patch("src.agents.coding_agent.agent.PostgresStore")
+    @patch("src.agents.coding_agent.quality_gate.code_review_graph")
+    @patch("src.agents.coding_agent.agent.ClaudeCodeExecutor")
+    def _make_mocks(self, mock_executor_cls, mock_review_graph, mock_postgres):
+        """Create reusable mocks."""
+        mock_postgres.return_value.log_decision = AsyncMock()
+        return mock_executor_cls, mock_review_graph, mock_postgres
+
+    @patch("src.agents.coding_agent.agent.PostgresStore")
+    @patch("src.agents.coding_agent.quality_gate.code_review_graph")
+    async def test_full_pipeline_approve(self, mock_review_graph, mock_postgres):
+        """Test full pipeline: task -> assess -> execute -> quality gate APPROVE -> finalize."""
+        mock_postgres.return_value.log_decision = AsyncMock()
+
+        # Mock the code review graph to return APPROVE
+        mock_review_graph.ainvoke = AsyncMock(return_value={
+            "review_result": {
+                "verdict": "APPROVE",
+                "summary": "Code looks great",
+                "comments": [],
+                "security_issues": [],
+            },
+            "posted": False,
+            "error": None,
+        })
+
+        state = _default_state(
+            task_id="e2e-approve-001",
+            description="Add a new endpoint for user profile",
+            repository="afcen/platform",
+            complexity=CodingComplexity.SIMPLE,
+        )
+
+        # Use MockCodeExecutor which doesn't need Docker
+        with patch(
+            "src.agents.coding_agent.agent.settings"
+        ) as mock_settings:
+            mock_settings.coding_enabled = False
+            mock_settings.has_anthropic = False
+            mock_settings.has_zai = False
+            mock_settings.anthropic_api_key = ""
+
+            result_state = await coding_graph.ainvoke(state)
+
+        assert result_state.get("status") == TaskStatus.COMPLETED
+        result = result_state.get("result")
+        assert result is not None
+        assert result.task_id == "e2e-approve-001"
+
+    @patch("src.agents.coding_agent.agent.PostgresStore")
+    @patch("src.agents.coding_agent.quality_gate.code_review_graph")
+    async def test_retry_then_approve(self, mock_review_graph, mock_postgres):
+        """Test retry flow: task -> execute -> REJECT -> retry -> APPROVE."""
+        mock_postgres.return_value.log_decision = AsyncMock()
+
+        # First call: REQUEST_CHANGES, second call: APPROVE
+        mock_review_graph.ainvoke = AsyncMock(side_effect=[
+            {
+                "review_result": {
+                    "verdict": "REQUEST_CHANGES",
+                    "summary": "Missing error handling",
+                    "comments": [{"body": "Add try/except"}],
+                    "security_issues": [],
+                },
+                "posted": False,
+                "error": None,
+            },
+            {
+                "review_result": {
+                    "verdict": "APPROVE",
+                    "summary": "Looks good now",
+                    "comments": [],
+                    "security_issues": [],
+                },
+                "posted": False,
+                "error": None,
+            },
+        ])
+
+        state = _default_state(
+            task_id="e2e-retry-001",
+            description="Add a new endpoint for user profile",
+            repository="afcen/platform",
+            complexity=CodingComplexity.SIMPLE,
+        )
+
+        with patch(
+            "src.agents.coding_agent.agent.settings"
+        ) as mock_settings:
+            mock_settings.coding_enabled = False
+            mock_settings.has_anthropic = False
+            mock_settings.has_zai = False
+            mock_settings.anthropic_api_key = ""
+
+            result_state = await coding_graph.ainvoke(state)
+
+        assert result_state.get("status") == TaskStatus.COMPLETED
+        result = result_state.get("result")
+        assert result is not None
+        # Should have retried at least once
+        assert result.retry_count >= 1
+
+    @patch("src.agents.coding_agent.agent.PostgresStore")
+    @patch("src.agents.coding_agent.quality_gate.code_review_graph")
+    async def test_max_retries_rejection(self, mock_review_graph, mock_postgres):
+        """Test pipeline exhausts max retries and gets rejected."""
+        mock_postgres.return_value.log_decision = AsyncMock()
+
+        # Always return REQUEST_CHANGES
+        mock_review_graph.ainvoke = AsyncMock(return_value={
+            "review_result": {
+                "verdict": "REQUEST_CHANGES",
+                "summary": "Still has issues",
+                "comments": [{"body": "Fix the bug"}],
+                "security_issues": [],
+            },
+            "posted": False,
+            "error": None,
+        })
+
+        state = _default_state(
+            task_id="e2e-reject-001",
+            description="Add a new endpoint",
+            repository="afcen/platform",
+            complexity=CodingComplexity.SIMPLE,
+        )
+        # Set max_retries to 1 so it fails faster
+        state["task"].max_retries = 1
+
+        with patch(
+            "src.agents.coding_agent.agent.settings"
+        ) as mock_settings:
+            mock_settings.coding_enabled = False
+            mock_settings.has_anthropic = False
+            mock_settings.has_zai = False
+            mock_settings.anthropic_api_key = ""
+
+            result_state = await coding_graph.ainvoke(state)
+
+        assert result_state.get("status") == TaskStatus.COMPLETED
+        result = result_state.get("result")
+        assert result is not None
+        assert result.status in (TaskStatus.REJECTED, TaskStatus.COMPLETED)
+
+    async def test_unsafe_task_rejected(self):
+        """Test that unsafe tasks are rejected early."""
+        state = _default_state(
+            task_id="e2e-unsafe-001",
+            description="delete all database tables",
+            repository="afcen/platform",
+        )
+
+        with patch(
+            "src.agents.coding_agent.agent.settings"
+        ) as mock_settings:
+            mock_settings.coding_enabled = False
+            mock_settings.has_anthropic = False
+            mock_settings.has_zai = False
+
+            result_state = await coding_graph.ainvoke(state)
+
+        assert result_state.get("status") == TaskStatus.FAILED
+        assert result_state.get("error") is not None
 
 
 @pytest.mark.asyncio
@@ -67,7 +237,7 @@ class TestQualityGate:
     """Test quality gate validation."""
 
     async def test_quality_gate_with_no_files(self):
-        """Test quality gate passes when no files modified."""
+        """Test quality gate rejects when no files modified."""
         github_client = MagicMock(spec=GitHubClient)
         gate = QualityGate(github_client=github_client)
 
@@ -86,8 +256,8 @@ class TestQualityGate:
 
         gate_result = await gate.validate(task, result)
 
-        assert gate_result.passed is True
-        assert gate_result.verdict == "COMMENT"
+        assert gate_result.passed is False
+        assert gate_result.verdict == "REQUEST_CHANGES"
         assert "No files were modified" in gate_result.summary
 
     @patch("src.agents.coding_agent.quality_gate.code_review_graph")

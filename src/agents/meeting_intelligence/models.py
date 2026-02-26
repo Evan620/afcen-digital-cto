@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -141,24 +141,24 @@ class ActionItem(BaseModel):
     completed_at: datetime | None = None
 
 
-class MeetingIntelligenceState(BaseModel):
+class MeetingIntelligenceState(TypedDict, total=False):
     """State for the Meeting Intelligence agent workflow."""
 
-    query_type: MeetingQueryType = MeetingQueryType.STATUS
-    query: str = ""
+    query_type: MeetingQueryType
+    query: str
 
     # Input data
-    meeting_id: str | None = None
-    meeting_title: str | None = None
-    meeting_date: datetime | None = None
-    participants: list[str] = Field(default_factory=list)
-    transcript: str | None = None
-    transcript_id: str | None = None
+    meeting_id: str | None
+    meeting_title: str | None
+    meeting_date: datetime | None
+    participants: list[str]
+    transcript: str | None
+    transcript_id: str | None
 
     # Output
-    analysis: MeetingAnalysis | None = None
-    brief: PreMeetingBrief | None = None
-    report: dict | None = None
+    analysis: MeetingAnalysis | None
+    brief: PreMeetingBrief | None
+    report: dict | None
 
     # Error handling
-    error: str | None = None
+    error: str | None

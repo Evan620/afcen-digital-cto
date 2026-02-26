@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # ── Claude Code System Prompt ──
 
-CLAUUDE_CODE_SYSTEM_PROMPT = """You are Claude Code, an AI coding assistant.
+CLAUDE_CODE_SYSTEM_PROMPT = """You are Claude Code, an AI coding assistant.
 
 Your task is to implement the requested changes following these guidelines:
 
@@ -105,9 +105,28 @@ class ClaudeCodeExecutor:
 
         try:
             self.docker_client = docker.from_env()
+            # Verify connectivity and image availability at init time
+            self.docker_client.ping()
             logger.info("Docker client initialized for Claude Code executor")
+            try:
+                self.docker_client.images.get(self.CONTAINER_IMAGE)
+                logger.info("Docker image '%s' found", self.CONTAINER_IMAGE)
+            except docker.errors.ImageNotFound:
+                logger.error(
+                    "Docker image '%s' NOT FOUND. Build it with: "
+                    "docker compose build claude-code-executor "
+                    "OR: docker build -t %s docker/claude-code/",
+                    self.CONTAINER_IMAGE,
+                    self.CONTAINER_IMAGE,
+                )
+                self.docker_client = None
         except DockerException as e:
-            logger.error("Failed to initialize Docker client: %s", e)
+            logger.error(
+                "Docker unavailable — cannot run coding tasks. "
+                "Ensure Docker socket is mounted (/var/run/docker.sock). "
+                "Error: %s",
+                e,
+            )
             self.docker_client = None
 
     async def execute_task(self, task: CodingTask) -> CodingResult:
@@ -124,7 +143,12 @@ class ClaudeCodeExecutor:
                 task_id=task.task_id,
                 agent_used=CodingAgentType.CLAUDE_CODE,
                 status=TaskStatus.FAILED,
-                errors=["Docker client not available"],
+                errors=[
+                    "Docker unavailable — cannot execute coding task. "
+                    "Ensure: (1) Docker socket is mounted to cto-app container, "
+                    f"(2) image '{self.CONTAINER_IMAGE}' is built. "
+                    "Run: docker compose --profile coding build claude-code-executor"
+                ],
             )
 
         started_at = datetime.utcnow()
@@ -152,6 +176,17 @@ class ClaudeCodeExecutor:
             # 5. Capture results
             files_modified = await self._get_modified_files(task, container)
 
+            # 5b. Commit and push changes if files were modified
+            commit_hash = None
+            branch_name = None
+            if files_modified:
+                try:
+                    commit_hash, branch_name = await self._commit_and_push_changes(
+                        task, workspace_mount,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to commit/push for task %s: %s", task.task_id, e)
+
             # 6. Clean up
             await self._cleanup_container(container)
 
@@ -163,6 +198,7 @@ class ClaudeCodeExecutor:
                 agent_used=CodingAgentType.CLAUDE_CODE,
                 status=TaskStatus.EXECUTING,
                 files_modified=files_modified,
+                commit_hash=commit_hash,
                 execution_time_seconds=execution_time,
                 docker_container_id=container_id,
                 started_at=started_at,
@@ -259,7 +295,15 @@ class ClaudeCodeExecutor:
         Returns:
             Tuple of (workspace_path, clone_url)
         """
+        import shutil
+
         workspace = os.path.join(self.repo_path, task.task_id)
+
+        # Clean up stale workspace from previous attempts
+        if os.path.exists(workspace):
+            logger.warning("Removing stale workspace: %s", workspace)
+            shutil.rmtree(workspace, ignore_errors=True)
+
         os.makedirs(workspace, exist_ok=True)
 
         # Build clone URL with authentication
@@ -507,8 +551,8 @@ class ClaudeCodeExecutor:
         if os.path.exists(git_config_volume):
             volumes[git_config_volume] = {"bind": "/root/.git", "mode": "ro"}
 
-        mem_limit = "512m"
-        cpu_quota = 50000  # 50% of a CPU
+        mem_limit = "2g"  # Claude Code + Node.js needs headroom
+        cpu_quota = 100000  # 1 full CPU
 
         container = self.docker_client.containers.run(
             self.CONTAINER_IMAGE,
@@ -535,37 +579,66 @@ class ClaudeCodeExecutor:
                 lambda: container.wait(timeout=self.timeout),
             )
 
-        await asyncio.wait_for(wait_for_container(), timeout=self.timeout)
+        result = await asyncio.wait_for(wait_for_container(), timeout=self.timeout)
 
-        # Get logs
+        exit_code = result.get("StatusCode", -1)
         logs = container.logs(stdout=True, stderr=True).decode("utf-8")
+
+        if exit_code != 0:
+            logger.warning(
+                "Container exited with code %d. Last 500 chars of logs: %s",
+                exit_code,
+                logs[-500:] if logs else "(empty)",
+            )
+
         return logs
 
     async def _get_modified_files(self, task: CodingTask, container: Any) -> list[FileChange]:
-        """Get the list of modified files from the container."""
-        try:
-            # Run git diff --name-status to get changes
-            exit_code, output = container.exec_run(
-                f"cd {self.WORKSPACE_PATH} && git diff --name-status HEAD",
-            )
+        """Get the list of modified files from the container.
 
-            if exit_code != 0:
-                return []
+        Uses docker diff on the stopped container (exec_run fails on
+        stopped containers). Falls back to inspecting the workspace
+        directory on the host if the volume is accessible.
+        """
+        try:
+            # After container.wait(), the container is stopped.
+            # Use container.diff() which works on stopped containers.
+            diffs = container.diff() or []
 
             files: list[FileChange] = []
-            for line in output.decode("utf-8").strip().split("\n"):
-                if not line:
+            seen_paths: set[str] = set()
+            for change in diffs:
+                path = change.get("Path", "")
+                kind = change.get("Kind", 0)  # 0=Modified, 1=Added, 2=Deleted
+
+                # Only track files under the workspace
+                if not path.startswith(self.WORKSPACE_PATH + "/"):
                     continue
 
-                parts = line.split("\t")
-                if len(parts) >= 2:
-                    status, path = parts[0], parts[1]
-                    files.append(FileChange(path=path, status=status))
+                # Strip workspace prefix to get repo-relative path
+                rel_path = path[len(self.WORKSPACE_PATH) + 1:]
 
+                # Skip .git internals
+                if rel_path.startswith(".git/") or rel_path == ".git":
+                    continue
+
+                if rel_path and rel_path not in seen_paths:
+                    seen_paths.add(rel_path)
+                    status_map = {0: "modified", 1: "added", 2: "deleted"}
+                    files.append(FileChange(
+                        path=rel_path,
+                        status=status_map.get(kind, "modified"),
+                    ))
+
+            logger.info(
+                "Detected %d modified files in container for task %s",
+                len(files),
+                task.task_id,
+            )
             return files
 
         except Exception as e:
-            logger.warning("Failed to get modified files: %s", e)
+            logger.error("Failed to get modified files for task %s: %s", task.task_id, e)
             return []
 
     async def _cleanup_container(self, container: Any):
@@ -576,6 +649,67 @@ class ClaudeCodeExecutor:
         except Exception as e:
             logger.warning("Failed to cleanup container: %s", e)
 
+    async def _commit_and_push_changes(
+        self,
+        task: CodingTask,
+        workspace_path: str,
+    ) -> tuple[str, str]:
+        """Commit and push changes from the workspace.
+
+        Runs: checkout -b, add -A, commit -m, push origin.
+
+        Args:
+            task: The coding task
+            workspace_path: Path to the workspace directory
+
+        Returns:
+            Tuple of (commit_hash, branch_name)
+        """
+        branch_name = task.branch_name or f"digital-cto/{task.task_id[:12]}"
+        commit_msg = f"[Digital CTO] {task.description[:200]}"
+
+        async def _run_git(*args: str) -> tuple[str, str, int]:
+            cmd = ["git", "-C", workspace_path, *args]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            return stdout.decode().strip(), stderr.decode().strip(), proc.returncode
+
+        # Checkout new branch
+        _, err, rc = await _run_git("checkout", "-b", branch_name)
+        if rc != 0 and "already exists" not in err:
+            raise RuntimeError(f"git checkout -b failed: {err}")
+
+        # Stage all changes
+        _, err, rc = await _run_git("add", "-A")
+        if rc != 0:
+            raise RuntimeError(f"git add failed: {err}")
+
+        # Commit
+        _, err, rc = await _run_git("commit", "-m", commit_msg)
+        if rc != 0:
+            raise RuntimeError(f"git commit failed: {err}")
+
+        # Get commit hash
+        out, _, _ = await _run_git("rev-parse", "HEAD")
+        commit_hash = out
+
+        # Push to origin
+        _, err, rc = await _run_git("push", "origin", branch_name)
+        if rc != 0:
+            logger.warning("git push failed for task %s: %s", task.task_id, err)
+
+        logger.info(
+            "Committed and pushed changes for task %s: branch=%s, hash=%s",
+            task.task_id,
+            branch_name,
+            commit_hash[:12] if commit_hash else "unknown",
+        )
+        return commit_hash, branch_name
+
     async def _force_cleanup(self, container_id: str):
         """Force cleanup of a container by ID."""
         try:
@@ -584,6 +718,39 @@ class ClaudeCodeExecutor:
             container.remove(force=True)
         except Exception as e:
             logger.warning("Failed to force cleanup container %s: %s", container_id, e)
+
+
+# ── Aider Executor ──
+
+
+class AiderExecutor(ClaudeCodeExecutor):
+    """Execute coding tasks using Aider AI coding assistant.
+
+    Runs Aider in the Docker container instead of Claude Code CLI.
+    Follows the same interface as ClaudeCodeExecutor.
+    """
+
+    def _build_command(self, task: CodingTask) -> list[str]:
+        """Build the Aider CLI command."""
+        command = [
+            "aider",
+            "--yes-always",          # Auto-confirm all prompts
+            "--no-auto-commits",     # We handle commits ourselves
+            "--model", os.getenv("AIDER_MODEL", "claude-sonnet-4-20250514"),
+            "--message", task.description,
+        ]
+
+        return command
+
+    async def execute_task(self, task: CodingTask) -> CodingResult:
+        """Execute a coding task using Aider.
+
+        Delegates to parent's execute_task but overrides _build_command
+        to use Aider CLI instead of Claude Code CLI.
+        """
+        result = await super().execute_task(task)
+        result.agent_used = CodingAgentType.AIDER
+        return result
 
 
 # ── Mock Executor for Testing ──

@@ -100,7 +100,7 @@ class ChatScreen:
         self.logo_drawn = False
 
         # Available agents
-        self.agents = ["Auto", "Code Review", "Sprint", "Arch", "DevOps", "Market", "Meeting"]
+        self.agents = ["Auto", "Code Review", "Sprint", "Arch", "DevOps", "Market", "Meeting", "Coding"]
 
     def add_message(self, role: str, content: str, agent: str = "System") -> None:
         """Add a message to the conversation.

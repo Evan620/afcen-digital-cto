@@ -11,6 +11,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from typing import TypedDict
+
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -241,31 +243,35 @@ class CodingResult(BaseModel):
 # ── Internal State ──
 
 
-class CodingAgentState(BaseModel):
-    """Internal state for the Coding Agent LangGraph."""
+class CodingAgentState(TypedDict, total=False):
+    """Internal state for the Coding Agent LangGraph.
+
+    Uses TypedDict (not BaseModel) because LangGraph requires TypedDict
+    for state schemas. Access fields via dict-style: state.get("task").
+    """
 
     # Input
-    task: CodingTask | None = None
+    task: CodingTask | None
 
     # State tracking
-    status: TaskStatus = TaskStatus.PENDING
-    current_retry: int = 0
+    status: TaskStatus
+    current_retry: int
 
     # Assessment
-    agent_selection: CodingAgentType | None = None
-    execution_plan: str | None = None
+    agent_selection: CodingAgentType | None
+    execution_plan: str | None
 
     # Execution results
-    result: CodingResult | None = None
+    result: CodingResult | None
 
     # Quality gate
-    quality_gate_result: dict | None = None
-    needs_retry: bool = False
-    retry_feedback: str | None = None
+    quality_gate_result: dict | None
+    needs_retry: bool
+    retry_feedback: str | None
 
     # Error handling
-    error: str | None = None
+    error: str | None
 
     # Timestamps
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
+    started_at: datetime | None
+    completed_at: datetime | None

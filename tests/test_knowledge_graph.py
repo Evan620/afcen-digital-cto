@@ -1,23 +1,77 @@
 """Tests for the Knowledge Graph (Phase 4)."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 from src.memory.knowledge_graph import (
     KnowledgeGraphStore,
     get_knowledge_graph,
+    _sanitize_cypher_value,
+    _validate_identifier,
 )
 from src.config import settings
 
 
+# ── Input Sanitization Tests ──
+
+
+class TestCypherSanitization:
+    """Test Cypher query input sanitization helpers."""
+
+    def test_sanitize_escapes_single_quotes(self):
+        assert "\\'" in _sanitize_cypher_value("it's a test")
+
+    def test_sanitize_escapes_double_quotes(self):
+        assert '\\"' in _sanitize_cypher_value('say "hello"')
+
+    def test_sanitize_escapes_backslashes(self):
+        assert "\\\\" in _sanitize_cypher_value("path\\to\\file")
+
+    def test_sanitize_escapes_dollar_signs(self):
+        result = _sanitize_cypher_value("$$injection$$")
+        assert "$$" not in result
+
+    def test_sanitize_removes_null_bytes(self):
+        result = _sanitize_cypher_value("hello\x00world")
+        assert "\x00" not in result
+        assert "helloworld" == result
+
+    def test_sanitize_truncates_to_max_length(self):
+        long_str = "a" * 5000
+        result = _sanitize_cypher_value(long_str, max_length=100)
+        assert len(result) == 100
+
+    def test_sanitize_injection_attempt(self):
+        """Test that a Cypher injection attempt is neutralized."""
+        payload = "'}}) RETURN 1; DROP GRAPH afcen_knowledge CASCADE; // "
+        result = _sanitize_cypher_value(payload)
+        assert "\\'" in result  # Quotes are escaped
+
+    def test_validate_identifier_valid(self):
+        assert _validate_identifier("afcen_knowledge") == "afcen_knowledge"
+        assert _validate_identifier("test123") == "test123"
+
+    def test_validate_identifier_invalid(self):
+        with pytest.raises(ValueError):
+            _validate_identifier("afcen-knowledge")  # hyphens not allowed
+
+        with pytest.raises(ValueError):
+            _validate_identifier("graph'; DROP TABLE")
+
+        with pytest.raises(ValueError):
+            _validate_identifier("graph name")  # spaces not allowed
+
+
+# ── Knowledge Graph Store Tests with Mocks ──
+
+
 @pytest.mark.asyncio
 class TestKnowledgeGraphStore:
-    """Tests for the Knowledge Graph store."""
+    """Tests for the Knowledge Graph store with mocked DB."""
 
     @pytest.fixture
     def kg_store(self):
         """Create a test knowledge graph store."""
-        # Use None for URL since we're testing methods that don't require DB
         return KnowledgeGraphStore(url=None)
 
     async def test_kg_store_init(self, kg_store):
@@ -25,49 +79,148 @@ class TestKnowledgeGraphStore:
         assert kg_store is not None
         assert kg_store.graph_name == settings.knowledge_graph_name
 
-    @pytest.mark.skipif(not settings.knowledge_graph_enabled, reason="Knowledge graph not enabled")
-    async def test_log_decision_to_graph(self, kg_store):
-        """Test logging a decision to the knowledge graph."""
-        # This test requires a real PostgreSQL with AGE
-        # For now, we just verify the method exists
-        # Would need Docker integration test for real testing
-        pass
+    async def test_log_decision_creates_vertices_and_edges(self):
+        """Test log_decision_to_graph creates correct vertices and edges."""
+        kg = KnowledgeGraphStore(url=None)
 
-    async def test_query_similar_decisions(self, kg_store):
+        # Mock the engine on the instance
+        mock_conn = AsyncMock()
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        kg._engine = mock_engine
+
+        decision_id = await kg.log_decision_to_graph(
+            agent_name="code_review",
+            decision_type="pr_review",
+            reasoning="Found issues in code",
+            outcome="REQUEST_CHANGES",
+            context={"repository": "afcen/platform", "pr_number": 42},
+        )
+
+        assert decision_id is not None
+        assert "code_review" in decision_id
+        assert "pr_review" in decision_id
+
+        # Should have executed: agent vertex, decision vertex, MAKES edge,
+        # AFFECTS edge (repository), RELATES_TO edge (pr_number) = 5 calls
+        assert mock_conn.execute.call_count == 5
+
+    async def test_log_decision_without_context(self):
+        """Test log_decision with no context (no AFFECTS/RELATES_TO edges)."""
+        kg = KnowledgeGraphStore(url=None)
+
+        mock_conn = AsyncMock()
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        kg._engine = mock_engine
+
+        decision_id = await kg.log_decision_to_graph(
+            agent_name="architecture_advisor",
+            decision_type="tech_eval",
+            reasoning="Evaluated FastAPI",
+            outcome="APPROVED",
+        )
+
+        assert decision_id is not None
+        # Only: agent vertex, decision vertex, MAKES edge = 3 calls
+        assert mock_conn.execute.call_count == 3
+
+    async def test_log_decision_sanitizes_inputs(self):
+        """Test that injection payloads are sanitized in log_decision."""
+        kg = KnowledgeGraphStore(url=None)
+
+        mock_conn = AsyncMock()
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        kg._engine = mock_engine
+
+        # Try injection in agent_name
+        decision_id = await kg.log_decision_to_graph(
+            agent_name="agent'; DROP GRAPH --",
+            decision_type="test",
+            reasoning="normal reasoning",
+            outcome="normal outcome",
+        )
+
+        # Should not raise — injection is sanitized
+        assert decision_id is not None
+
+        # Verify the executed queries contain escaped values
+        for call_args in mock_conn.execute.call_args_list:
+            query_text = str(call_args[0][0].text)
+            assert "DROP GRAPH" not in query_text or "\\'" in query_text
+
+    async def test_get_decision_patterns_returns_populated_structure(self):
+        """Test get_decision_patterns returns fully populated dict."""
+        kg = KnowledgeGraphStore(url=None)
+
+        mock_conn = AsyncMock()
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        kg._engine = mock_engine
+
+        # Mock three query results: by_agent, by_type, success_rate
+        mock_result_agent = MagicMock()
+        mock_result_agent.fetchall.return_value = [
+            ('"code_review"', "15"),
+            ('"sprint_planner"', "8"),
+        ]
+
+        mock_result_type = MagicMock()
+        mock_result_type.fetchall.return_value = [
+            ('"pr_review"', "12"),
+            ('"sprint_query"', "8"),
+            ('"tech_eval"', "3"),
+        ]
+
+        mock_result_success = MagicMock()
+        mock_result_success.fetchone.return_value = ("18",)
+
+        mock_conn.execute = AsyncMock(
+            side_effect=[mock_result_agent, mock_result_type, mock_result_success]
+        )
+
+        patterns = await kg.get_decision_patterns(repository="afcen/platform", days=30)
+
+        assert patterns["total_decisions"] == 23
+        assert patterns["by_agent"]["code_review"] == 15
+        assert patterns["by_agent"]["sprint_planner"] == 8
+        assert patterns["by_type"]["pr_review"] == 12
+        assert patterns["by_type"]["sprint_query"] == 8
+        assert patterns["by_type"]["tech_eval"] == 3
+        assert patterns["success_rate"] == round(18 / 23, 3)
+
+    async def test_query_similar_decisions_returns_list(self, kg_store):
         """Test querying similar decisions (returns empty list without DB)."""
-        # Mock behavior - returns empty list when no DB
         results = await kg_store.query_similar_decisions(
             decision_type="architecture_decision",
             limit=10,
         )
-
-        # Should return a list (possibly empty)
         assert isinstance(results, list)
 
-    async def test_query_agent_decisions(self, kg_store):
+    async def test_query_agent_decisions_returns_list(self, kg_store):
         """Test querying decisions by agent (returns empty list without DB)."""
-        # Mock behavior - returns empty list when no DB
         results = await kg_store.query_agent_decisions(
             agent_name="architecture_advisor",
             limit=20,
         )
-
-        # Should return a list
         assert isinstance(results, list)
 
-    async def test_get_decision_patterns(self, kg_store):
-        """Test analyzing decision patterns (returns default structure without DB)."""
-        # Mock behavior - returns default structure when no DB
+    async def test_get_decision_patterns_defaults_without_db(self, kg_store):
+        """Test get_decision_patterns returns default structure without DB."""
         patterns = await kg_store.get_decision_patterns(
             repository="afcen/platform",
             days=30,
         )
-
-        # Should return a dictionary with expected keys
         assert isinstance(patterns, dict)
         assert "total_decisions" in patterns
         assert "by_agent" in patterns
         assert "by_type" in patterns
+        assert "success_rate" in patterns
 
 
 @pytest.mark.asyncio
@@ -84,36 +237,6 @@ class TestKnowledgeGraphSingleton:
         assert kg is kg2
 
 
-@pytest.mark.asyncio
-class TestKnowledgeGraphIntegration:
-    """Integration tests for knowledge graph with other agents."""
-
-    async def test_graph_logging_from_decision(self):
-        """Test that decisions are logged to graph."""
-        # This would test the integration with postgres_store.log_decision
-        # For now, we verify the code path exists
-        from src.memory.postgres_store import PostgresStore
-
-        # Don't try to connect to a real DB in tests
-        store = PostgresStore(url=None)
-
-        # The log_decision method should handle errors gracefully
-        # when the graph is not available
-        try:
-            await store.log_decision(
-                agent_name="test_agent",
-                decision_type="test_decision",
-                reasoning="Test reasoning",
-                outcome="Test outcome",
-            )
-        except Exception:
-            # Expected in test environment - no DB available
-            pass
-
-        # If we get here without exception, the code path works
-        assert True
-
-
 def test_knowledge_graph_config():
     """Test knowledge graph configuration."""
     assert hasattr(settings, "knowledge_graph_enabled")
@@ -125,7 +248,5 @@ def test_knowledge_graph_config():
 async def test_kg_health_check():
     """Test knowledge graph health check."""
     kg = KnowledgeGraphStore(url=None)
-
-    # In test environment, this should gracefully handle failure
     result = await kg.health_check()
     assert isinstance(result, bool)

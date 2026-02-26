@@ -142,7 +142,8 @@ class TestQualityGate:
 
         gate_result = await gate.validate(task, result)
 
-        assert gate_result.passed is True
+        assert gate_result.passed is False
+        assert gate_result.verdict == "REQUEST_CHANGES"
         assert "No files were modified" in gate_result.summary
 
 
@@ -158,10 +159,10 @@ class TestCodingAgentGraph:
             repository="afcen/platform",
         )
 
-        assert state.task is not None
-        assert state.task.task_id == "test-state"
-        assert state.task.description == "Test task"
-        assert state.status == TaskStatus.PENDING
+        assert state["task"] is not None
+        assert state["task"].task_id == "test-state"
+        assert state["task"].description == "Test task"
+        assert state["status"] == TaskStatus.PENDING
 
     @patch("src.agents.coding_agent.agent.ClaudeCodeExecutor")
     async def test_coding_graph_execution(self, mock_executor_class):

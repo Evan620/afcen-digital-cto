@@ -164,6 +164,8 @@ For each item, return:
 
 
 # ── Pre-Meeting Brief Prompt ──
+# DEPRECATED: This prompt is unused by the Market Scanner agent.
+# The Meeting Intelligence agent (src/agents/meeting_intelligence/) has its own prompts.
 
 PRE_MEETING_BRIEF_PROMPT = """Generate a pre-meeting brief for Joseph based on upcoming meeting context.
 
@@ -222,6 +224,8 @@ Generate a concise pre-meeting brief that prepares Joseph with:
 
 
 # ── Meeting Follow-up Prompt ──
+# DEPRECATED: This prompt is unused by the Market Scanner agent.
+# The Meeting Intelligence agent (src/agents/meeting_intelligence/) has its own prompts.
 
 MEETING_FOLLOWUP_PROMPT = """Generate actionable follow-up items from a meeting transcript.
 

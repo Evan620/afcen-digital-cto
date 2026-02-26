@@ -39,6 +39,7 @@ services:
     volumes:
       - ./src:/app/src # Hot-reload in development
       - repo_workspace:/workspace  # Phase 4: Coding workspace
+      - /var/run/docker.sock:/var/run/docker.sock  # Phase 4: Docker-in-Docker for Coding Agent
     restart: unless-stopped
 
   # ── OpenClaw Node Host (JARVIS ↔ CTO Bridge) ──
@@ -123,6 +124,7 @@ services:
     build:
       context: ./docker/claude-code
       dockerfile: Dockerfile
+    image: digital-cto-claude-code:latest  # Must match CLAUDE_CODE_IMAGE in executor.py
     container_name: digital-cto-claude-executor
     privileged: true  # Required for Docker-in-Docker
     network_mode: "service:ts-cto"
@@ -134,23 +136,28 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - CLAUDE_DEFAULT_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-20250514}
+    healthcheck:
+      test: ["CMD", "claude", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     restart: "no"  # Started on-demand via API
     profiles:
       - coding
 
   # ── Apache AGE for Knowledge Graph (Phase 4) ──
   postgres-with-age:
-    image: bitnami/postgresql:16
+    image: apache/age:PG16_latest
     container_name: digital-cto-postgres-age
     ports:
       - "5435:5432"
     environment:
-      POSTGRESQL_USERNAME: cto
-      POSTGRESQL_PASSWORD: cto_secret
-      POSTGRESQL_DATABASE: digital_cto
-      POSTGRESQL_INITSCRIPT_FLAGS: "--shared-preload-libraries=age"
+      POSTGRES_USER: cto
+      POSTGRES_PASSWORD: cto_secret
+      POSTGRES_DB: digital_cto
     volumes:
-      - postgres_age_data:/bitnami/postgresql/data
+      - postgres_age_data:/var/lib/postgresql/data
       - ./docker/age/init.sql:/docker-entrypoint-initdb.d/01-age.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cto -d digital_cto"]

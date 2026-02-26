@@ -8,6 +8,7 @@ Phase 2 Jobs:
 Phase 3 Jobs:
   4. Market scan — collect market intelligence from news, DFIs, registries
   5. Morning brief — generate and deliver daily morning briefing
+  6. Meeting intelligence — check for outstanding actions and upcoming meetings
 """
 
 from __future__ import annotations
@@ -260,6 +261,57 @@ async def morning_brief_job() -> None:
         logger.error("Morning brief job failed: %s", e)
 
 
+async def meeting_intel_job() -> None:
+    """Check for outstanding meeting action items and generate status report.
+
+    Runs at 7 AM weekdays to surface overdue items and recent meeting insights.
+    """
+    logger.info("Running meeting intelligence job...")
+    try:
+        from src.agents.meeting_intelligence.agent import get_meeting_status
+        from src.memory.postgres_store import PostgresStore
+
+        status = await get_meeting_status()
+
+        if not status:
+            logger.warning("Meeting intelligence status returned None")
+            return
+
+        # Store report
+        store = PostgresStore()
+        await store.save_report("meeting_intel", status, notified=False)
+
+        outstanding = status.get("outstanding_action_items", 0)
+
+        # Notify JARVIS if there are overdue items
+        if outstanding > 0:
+            try:
+                from src.integrations.openclaw_client import get_openclaw_client
+
+                client = get_openclaw_client()
+                if client.is_connected:
+                    await client.send_agent_message(
+                        recipient="jarvis",
+                        message=(
+                            f"Meeting Intelligence: {outstanding} outstanding action items. "
+                            f"Recent meetings: {status.get('recent_meetings_count', 0)} in last 30 days."
+                        ),
+                        context={"type": "meeting_intel", **status},
+                    )
+                    logger.info("Meeting intel status sent to JARVIS")
+            except Exception as e:
+                logger.debug("JARVIS notification skipped: %s", e)
+
+        logger.info(
+            "Meeting intel job complete: %d outstanding actions, %d recent meetings",
+            outstanding,
+            status.get("recent_meetings_count", 0),
+        )
+
+    except Exception as e:
+        logger.error("Meeting intelligence job failed: %s", e)
+
+
 def configure_scheduler() -> AsyncIOScheduler:
     """Create and configure the APScheduler with cron jobs from config.
 
@@ -340,6 +392,21 @@ def configure_scheduler() -> AsyncIOScheduler:
             logger.info("Scheduled morning brief: %s", settings.morning_brief_cron)
         except Exception as e:
             logger.error("Failed to schedule morning brief: %s", e)
+
+    # Phase 3: Meeting intelligence
+    if settings.meeting_intel_enabled:
+        try:
+            cron_kwargs = _parse_cron(settings.meeting_intel_cron)
+            scheduler.add_job(
+                meeting_intel_job,
+                CronTrigger(**cron_kwargs),
+                id="meeting_intel",
+                name="Meeting Intelligence Status",
+                replace_existing=True,
+            )
+            logger.info("Scheduled meeting intel: %s", settings.meeting_intel_cron)
+        except Exception as e:
+            logger.error("Failed to schedule meeting intel: %s", e)
 
     _scheduler = scheduler
     return scheduler

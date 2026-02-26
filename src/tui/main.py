@@ -12,11 +12,9 @@ from src.tui.utils.visual import (
     BrandColors,
     brand,
     cto,
-    draw_box,
     draw_header_bar,
     draw_logo,
     gold,
-    header_box,
     muted,
     status_icon,
     success,
@@ -136,40 +134,14 @@ def cmd_logs() -> int:
 
 
 def cmd_config() -> int:
-    """Show or edit configuration.
+    """Open the interactive configuration editor.
 
     Returns:
         Exit code
     """
-    from src.tui.onboard.config import CONFIG_FILE, load_config
+    from src.tui.screens.config import show_config_screen
 
-    config = load_config()
-
-    print()
-    print(brand("📝 Digital CTO Configuration"))
-    print()
-    print(muted(f"Config file: {CONFIG_FILE}"))
-    print()
-
-    # Show current config
-    print(f"  {cto('Version:', BrandColors.BOLD_TEXT)} {config.version}")
-    print(f"  {cto('Onboarded:', BrandColors.BOLD_TEXT)} {status_icon('ready') if config.onboarded else muted('No')}")
-    print(f"  {cto('LLM Provider:', BrandColors.BOLD_TEXT)} {gold(config.llm.provider.upper())}")
-    print(f"  {cto('GitHub Repos:', BrandColors.BOLD_TEXT)} {', '.join(config.github.repos) or muted('None')}")
-
-    # Agent status
-    print()
-    print(brand("  Agents:"))
-    agents = config.agents
-    print(f"    {status_icon('ready' if agents.code_review.enabled else 'disabled')} Code Review: {brand('Enabled') if agents.code_review.enabled else muted('Disabled')}")
-    print(f"    {status_icon('ready' if agents.sprint_planner.enabled else 'disabled')} Sprint Planner: {brand('Enabled') if agents.sprint_planner.enabled else muted('Disabled')}")
-    print(f"    {status_icon('ready' if agents.architecture_advisor.enabled else 'disabled')} Architecture: {brand('Enabled') if agents.architecture_advisor.enabled else muted('Disabled')}")
-    print(f"    {status_icon('ready' if agents.devops.enabled else 'disabled')} DevOps: {brand('Enabled') if agents.devops.enabled else muted('Disabled')}")
-
-    print()
-    print(muted("Use 'cto onboard' to reconfigure or edit the file directly."))
-    print()
-
+    show_config_screen()
     return 0
 
 

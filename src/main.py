@@ -156,6 +156,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Failed to initialize knowledge graph: %s", e)
 
+    # Auto-discover A2A agents if enabled
+    if a2a_handler and settings.a2a_known_agents:
+        try:
+            discovered = await a2a_handler.discover_agents(settings.a2a_known_agents)
+            logger.info("A2A agent discovery complete: %d agents found", len(discovered))
+        except Exception as e:
+            logger.warning("A2A agent discovery failed: %s", e)
+
     # Start APScheduler if enabled
     scheduler = None
     if settings.scheduler_enabled:
@@ -242,9 +250,11 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions with consistent JSON format."""
-    return HTTPException(
+    from starlette.responses import JSONResponse
+
+    return JSONResponse(
         status_code=exc.status_code,
-        detail={"error": exc.detail},
+        content={"error": exc.detail},
     )
 
 
@@ -328,6 +338,14 @@ async def health_check(request: Request):
     if settings.openclaw_enabled:
         all_ok = all_ok and openclaw_ok
 
+    # Knowledge graph check
+    knowledge_graph_ok = False
+    if settings.knowledge_graph_enabled and knowledge_graph_store:
+        try:
+            knowledge_graph_ok = await knowledge_graph_store.health_check()
+        except Exception:
+            knowledge_graph_ok = False
+
     services = {
         "redis": "ok" if redis_ok else "down",
         "postgres": "ok" if postgres_ok else "down",
@@ -337,6 +355,8 @@ async def health_check(request: Request):
         services["openclaw"] = "ok" if openclaw_ok else "down"
     if settings.scheduler_enabled:
         services["scheduler"] = "ok" if scheduler_ok else "down"
+    if settings.knowledge_graph_enabled:
+        services["knowledge_graph"] = "ok" if knowledge_graph_ok else "down"
 
     return {
         "status": "ok" if all_ok else "degraded",
@@ -994,6 +1014,9 @@ async def submit_coding_task(request: Request):
         "autonomy_level": "semi_autonomous"
     }
     """
+    if not settings.coding_enabled:
+        raise HTTPException(status_code=501, detail="Coding agent is not enabled")
+
     body = await request.json()
 
     description = body.get("description", "")
@@ -1051,6 +1074,9 @@ async def get_coding_task_status(task_id: str):
     Args:
         task_id: The task identifier
     """
+    if not settings.coding_enabled:
+        raise HTTPException(status_code=501, detail="Coding agent is not enabled")
+
     try:
         result = await get_task_status(task_id)
 
@@ -1076,6 +1102,9 @@ async def get_coding_task_history(limit: int = 20):
     Args:
         limit: Maximum number of tasks to return
     """
+    if not settings.coding_enabled:
+        raise HTTPException(status_code=501, detail="Coding agent is not enabled")
+
     try:
         from src.agents.coding_agent.agent import _task_store
 
@@ -1187,6 +1216,9 @@ async def agent_card():
     Returns the agent card with capabilities and endpoints for
     other agents to discover and interact with this agent.
     """
+    if not settings.a2a_enabled:
+        raise HTTPException(status_code=501, detail="A2A protocol is not enabled")
+
     import os
 
     base_url = os.getenv("AGENT_BASE_URL", "https://cto.afcen.org")
@@ -1216,9 +1248,12 @@ async def a2a_webhook(request: Request):
     try:
         directive = await a2a_handler.receive_directive(body)
 
+        # Map A2A type to internal supervisor event type
+        mapped_type = a2a_handler.map_directive_type(directive.type)
+
         # Process the directive through the supervisor
         supervisor_input = {
-            "event_type": directive.type,
+            "event_type": mapped_type,
             "source": "a2a",
             "payload": directive.payload,
             "routed_to": None,
@@ -1291,6 +1326,7 @@ _AGENT_HINT_MAP = {
     "DevOps": "devops_status",
     "Market": "market_status",
     "Meeting": "meeting_status",
+    "Coding": "coding_task",
 }
 
 
@@ -1314,6 +1350,7 @@ async def _classify_chat_intent(message: str) -> str:
         "- devops_status: CI/CD, pipeline, deployment, infrastructure, monitoring\n"
         "- market_status: market data, competitors, trends, morning brief\n"
         "- meeting_status: meetings, agenda, action items\n"
+        "- coding_task: write code, implement feature, fix bug, generate code, create endpoint, coding agent\n"
         "- general: greetings, broad questions, capabilities, anything else\n\n"
         f"User message: {message}\n\n"
         "Category:"
@@ -1326,7 +1363,8 @@ async def _classify_chat_intent(message: str) -> str:
         category = response.content.strip().lower().replace('"', "").replace("'", "")
         valid = {
             "pull_request", "sprint_query", "architecture_query",
-            "devops_status", "market_status", "meeting_status", "general",
+            "devops_status", "market_status", "meeting_status",
+            "coding_task", "general",
         }
         return category if category in valid else "general"
     except Exception as e:
@@ -1389,9 +1427,11 @@ async def chat_endpoint(request: Request):
     if not message:
         raise HTTPException(status_code=400, detail="'message' field required")
 
-    # Determine event_type
+    # Determine event_type (case-insensitive hint matching)
     if agent_hint and agent_hint != "Auto":
-        event_type = _AGENT_HINT_MAP.get(agent_hint)
+        # Build case-insensitive lookup
+        hint_lower = {k.lower(): v for k, v in _AGENT_HINT_MAP.items()}
+        event_type = hint_lower.get(agent_hint.lower())
         if not event_type:
             raise HTTPException(
                 status_code=400,

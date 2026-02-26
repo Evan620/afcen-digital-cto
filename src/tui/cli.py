@@ -133,8 +133,23 @@ def chat(message: Optional[str]) -> None:
     """
     if message:
         # Quick message mode - send and get response
-        echo(f"Sending message: {message}")
-        echo("(Quick message mode not yet implemented)")
+        import asyncio
+        import httpx
+        from src.tui.backend_client import get_backend_client
+
+        client = get_backend_client()
+        try:
+            result = asyncio.run(client.chat(message=message))
+            agent = result.get("agent", "Supervisor")
+            response = result.get("response", "")
+            echo(style(f"[{agent}]", fg="cyan", bold=True))
+            echo(response)
+        except (httpx.ConnectError, httpx.TimeoutException, OSError):
+            echo(style("Backend unreachable. Start with: docker compose up -d", fg="yellow"), err=True)
+            sys.exit(1)
+        except httpx.HTTPStatusError as e:
+            echo(style(f"Backend error (HTTP {e.response.status_code})", fg="red"), err=True)
+            sys.exit(1)
         sys.exit(0)
     else:
         sys.exit(cmd_chat())
@@ -170,26 +185,55 @@ def review(pr_url: Optional[str], repo: Optional[str], number: Optional[int]) ->
     You can specify the PR by URL, or by repo and number.
     """
     if pr_url:
-        echo(f"Requesting review for: {pr_url}")
+        pr_ref = pr_url
     elif repo and number:
-        echo(f"Requesting review for {repo}#{number}")
+        pr_ref = f"{repo}#{number}"
     else:
         echo("Error: Specify PR URL or use --repo and --number", err=True)
         sys.exit(1)
 
-    echo("(Code review command not yet implemented)")
+    echo(f"Requesting review for: {pr_ref}")
+    from src.tui.screens.code_review import quick_review
+
+    result = quick_review(pr_ref)
+    if result is None:
+        echo(style("Backend unreachable. Start with: docker compose up -d", fg="yellow"), err=True)
+        sys.exit(1)
+    echo(result)
     sys.exit(0)
 
 
 @cli.command()
 def sprint() -> None:
     """Show current sprint status."""
-    echo("Sprint status:")
-    echo("  Current Sprint: Sprint 24")
-    echo("  Progress: 12/18 tasks (67%)")
-    echo("  Velocity: 38 points")
-    echo()
-    echo("(Sprint details not yet implemented)")
+    import asyncio
+    import httpx
+    from src.tui.backend_client import get_backend_client
+
+    client = get_backend_client()
+    try:
+        data = asyncio.run(client.sprint_status())
+    except (httpx.ConnectError, httpx.TimeoutException, OSError):
+        echo(style("Backend unreachable. Start with: docker compose up -d", fg="yellow"), err=True)
+        sys.exit(1)
+    except httpx.HTTPStatusError as e:
+        echo(style(f"Backend error (HTTP {e.response.status_code})", fg="red"), err=True)
+        sys.exit(1)
+
+    metrics = data.get("metrics", {})
+    sprint_name = metrics.get("sprint_name", metrics.get("current_sprint", "N/A"))
+    total = metrics.get("total_tasks", 0)
+    completed = metrics.get("completed_tasks", 0)
+    pct = int((completed / total * 100) if total else 0)
+    velocity = metrics.get("velocity", "N/A")
+    blocked = metrics.get("blocked_items", metrics.get("blocked", 0))
+
+    echo(style("Sprint Status", bold=True))
+    echo(f"  Sprint:    {sprint_name}")
+    echo(f"  Progress:  {completed}/{total} tasks ({pct}%)")
+    echo(f"  Velocity:  {velocity} pts/sprint")
+    if blocked:
+        echo(style(f"  Blocked:   {blocked} items", fg="yellow"))
     sys.exit(0)
 
 
@@ -197,8 +241,14 @@ def sprint() -> None:
 def brief() -> None:
     """Generate morning brief."""
     echo("Generating morning brief...")
+    from src.tui.screens.market import quick_brief
+
+    result = quick_brief()
+    if result is None:
+        echo(style("Backend unreachable. Start with: docker compose up -d", fg="yellow"), err=True)
+        sys.exit(1)
     echo()
-    echo("(Morning brief not yet implemented)")
+    echo(result)
     sys.exit(0)
 
 
